@@ -17,9 +17,13 @@ app.use(express.json({ limit: "20mb" }));
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-const SOFFICE_PATH =
-  process.env.SOFFICE_PATH ||
-  "C:\\Program Files\\LibreOffice\\program\\soffice.exe";
+const DEFAULT_SOFFICE =
+  process.platform === "win32"
+    ? "C:\\Program Files\\LibreOffice\\program\\soffice.exe"
+    : "/usr/bin/soffice";
+
+const SOFFICE_PATH = process.env.SOFFICE_PATH || DEFAULT_SOFFICE;
+
 
 // ✅ Default template (fallback)
 const DEFAULT_TEMPLATE_PATH = path.join(__dirname, "template.pptx");
