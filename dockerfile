@@ -1,25 +1,26 @@
-FROM node:20-bullseye
+FROM node:20-bookworm
 
-# LibreOffice para convertir PPTX->PDF
 RUN apt-get update && apt-get install -y \
   libreoffice \
   libreoffice-impress \
   fonts-dejavu \
   fonts-liberation \
+  fonts-noto \
+  fonts-noto-cjk \
+  fonts-noto-color-emoji \
+  fontconfig \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 COPY . .
 
-ENV NODE_ENV=production
+# (Opcional) si tenés fuentes .ttf propias:
+# COPY fonts/ /usr/local/share/fonts/
+# RUN fc-cache -fv
+
 ENV PORT=3000
-# En Linux, el bin suele ser "soffice"
-ENV SOFFICE_PATH=/usr/bin/soffice
-
 EXPOSE 3000
-
 CMD ["node", "server.js"]

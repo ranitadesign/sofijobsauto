@@ -22,7 +22,8 @@ const DEFAULT_SOFFICE =
     ? "C:\\Program Files\\LibreOffice\\program\\soffice.exe"
     : "/usr/bin/soffice";
 
-const SOFFICE_PATH = process.env.SOFFICE_PATH || DEFAULT_SOFFICE;
+    const SOFFICE_PATH = process.env.SOFFICE_PATH || "soffice";
+
 
 
 // ✅ Default template (fallback)
