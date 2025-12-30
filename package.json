@@ -13,6 +13,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "docxtemplater": "^3.67.6",
+    "docxtemplater-image-module-free": "^1.1.1",
     "express": "^5.2.1",
     "pizzip": "^3.2.0",
     "pptxgenjs": "^4.0.1"
