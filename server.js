@@ -1,4 +1,8 @@
 // server.js
+// ✅ Genera PDF desde PPTX con Docxtemplater + ImageModule
+// ✅ FOTO: en el PPTX usar placeholder EXACTO: {{%photo}}
+// ✅ Acepta foto por: photo_base64 (recomendado) o photo_url
+
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -12,20 +16,18 @@ const cors = require("cors");
 
 const PizZip = require("pizzip");
 const Docxtemplater = require("docxtemplater");
-
-// ✅ módulo de imágenes
 const ImageModule = require("docxtemplater-image-module-free");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "40mb" })); // subimos por imágenes base64
+app.use(express.json({ limit: "60mb" }));
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
 /**
  * LibreOffice / soffice:
- * - En Windows: ruta completa suele ser esa
- * - En Linux/Render/Railway: normalmente es "soffice"
+ * - Windows: ruta típica
+ * - Linux (Railway/Render): normalmente "soffice"
  */
 const DEFAULT_SOFFICE =
   process.platform === "win32"
@@ -34,11 +36,11 @@ const DEFAULT_SOFFICE =
 
 const SOFFICE_PATH = process.env.SOFFICE_PATH || DEFAULT_SOFFICE;
 
-// Carpeta de plantillas
+// Carpeta de plantillas PPTX
 const TEMPLATES_DIR = path.join(__dirname, "templates");
 
-// Template fallback (si no mandás template_id)
-const DEFAULT_TEMPLATE_ID = process.env.DEFAULT_TEMPLATE_ID || "Template_1_clasico";
+// Template default (si no mandás template_id) -> ahora es numérico
+const DEFAULT_TEMPLATE_ID = process.env.DEFAULT_TEMPLATE_ID || "1";
 
 /* ---------------- utils texto ---------------- */
 
@@ -48,7 +50,7 @@ function safeStr(v) {
 }
 
 function clamp(s, max) {
-  s = safeStr(s);
+  s = safeStr(s).trim();
   if (!s) return "";
   return s.length > max ? s.slice(0, Math.max(0, max - 1)).trimEnd() + "…" : s;
 }
@@ -86,20 +88,18 @@ function asBullets(arr, maxItems, maxCharsEach) {
     .map((x) => clampLines(x, maxCharsEach, 2));
 }
 
-/** Lee un valor desde varias keys alternativas */
-function getAny(body, keys, fallback = "") {
+function getAny(obj, keys, fallback = "") {
   for (const k of keys) {
-    const v = body?.[k];
+    const v = obj?.[k];
     if (v !== undefined && v !== null && String(v).trim() !== "") return v;
   }
   return fallback;
 }
 
-/** Construye array desde campos planos tipo skill_1..skill_7 */
-function toArrayFromFlat(body, prefix, maxN) {
+function toArrayFromFlat(obj, prefix, maxN) {
   const out = [];
   for (let i = 1; i <= maxN; i++) {
-    const v = body?.[`${prefix}${i}`];
+    const v = obj?.[`${prefix}${i}`];
     if (v !== undefined && v !== null && String(v).trim() !== "") out.push(v);
   }
   return out;
@@ -107,15 +107,11 @@ function toArrayFromFlat(body, prefix, maxN) {
 
 /* ---------------- utils imagen ---------------- */
 
-/**
- * Acepta:
- * - data:image/png;base64,....
- * - base64 puro
- */
 function decodeBase64Image(b64) {
   if (!b64) return null;
   const s = String(b64).trim();
 
+  // data:image/jpeg;base64,....
   const m = s.match(/^data:(image\/\w+);base64,(.+)$/i);
   if (m) return Buffer.from(m[2], "base64");
 
@@ -123,205 +119,206 @@ function decodeBase64Image(b64) {
   return Buffer.from(s, "base64");
 }
 
+// Convierte links de Drive a descarga directa (para photo_url)
+function normalizeGoogleDriveUrl(url) {
+  if (!url) return "";
+  const u = String(url).trim();
+
+  // file/d/ID
+  const m1 = u.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (m1?.[1]) return `https://drive.google.com/uc?export=download&id=${m1[1]}`;
+
+  // open?id=ID
+  const m2 = u.match(/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/);
+  if (m2?.[1]) return `https://drive.google.com/uc?export=download&id=${m2[1]}`;
+
+  // cualquier URL con ?id=ID
+  const idMatch = u.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (idMatch?.[1]) return `https://drive.google.com/uc?export=download&id=${idMatch[1]}`;
+
+  // ya es uc
+  if (u.includes("drive.google.com/uc")) return u;
+
+  return u;
+}
+
+
 function fetchBufferFromUrl(url) {
   return new Promise((resolve, reject) => {
     if (!url) return resolve(null);
-    const u = String(url).trim();
-    const lib = u.startsWith("https://") ? https : http;
 
-    lib
-      .get(u, (resp) => {
+    const finalUrl = normalizeGoogleDriveUrl(String(url).trim());
+    const lib = finalUrl.startsWith("https://") ? https : http;
+
+    const req = lib.get(
+      finalUrl,
+      { headers: { "User-Agent": "Mozilla/5.0 (CV-Generator)", Accept: "*/*" } },
+      (resp) => {
         const code = resp.statusCode || 0;
+
+        // redirects
         if (code >= 300 && code < 400 && resp.headers.location) {
-          // redirect
           return resolve(fetchBufferFromUrl(resp.headers.location));
         }
-        if (code !== 200) {
-          return reject(new Error(`No pude descargar imagen. HTTP ${code}`));
-        }
+
+        if (code !== 200) return reject(new Error(`No pude descargar imagen. HTTP ${code}`));
+
         const chunks = [];
         resp.on("data", (d) => chunks.push(d));
         resp.on("end", () => resolve(Buffer.concat(chunks)));
-      })
-      .on("error", reject);
+      }
+    );
+
+    req.on("error", reject);
   });
 }
 
-/* ---------------- templates ---------------- */
+/* ---------------- templates (MAPPING) ---------------- */
+
+// 🔥 ACÁ ES DONDE DEFINÍS QUÉ ARCHIVO USA CADA MODELO
+// Poné EXACTAMENTE el nombre del .pptx tal como está dentro de /templates
+const TEMPLATE_MAP = {
+  1: "Plantilla_oficial_1_verde.pptx",
+  2: "Template_2_moderno.pptx",
+
+  // 👇 completá estos con tus nombres reales
+  3: "Template_3_oficial.pptx",
+  4: "PONER_NOMBRE_REAL_4.pptx",
+  5: "PONER_NOMBRE_REAL_5.pptx",
+  6: "PONER_NOMBRE_REAL_6.pptx",
+  7: "PONER_NOMBRE_REAL_7.pptx",
+  8: "PONER_NOMBRE_REAL_8.pptx",
+  9: "PONER_NOMBRE_REAL_9.pptx",
+
+  10: "Currículum Vitae Cv de Marketing Minimalista Beige (2).pptx",
+
+  11: "PONER_NOMBRE_REAL_11.pptx",
+  12: "PONER_NOMBRE_REAL_12.pptx",
+  13: "PONER_NOMBRE_REAL_13.pptx",
+  14: "PONER_NOMBRE_REAL_14.pptx",
+};
 
 function getTemplatePath(templateId) {
-  const id = (templateId || DEFAULT_TEMPLATE_ID || "").trim();
-  if (!id) throw new Error("Falta template_id y no hay DEFAULT_TEMPLATE_ID");
+  const raw = (templateId || DEFAULT_TEMPLATE_ID || "").toString().trim();
+  if (!raw) throw new Error("Falta template_id y no hay DEFAULT_TEMPLATE_ID");
 
-  // permitimos que te manden "Template_1_clasico" o "Template_1_clasico.pptx"
-  const fileName = id.toLowerCase().endsWith(".pptx") ? id : `${id}.pptx`;
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id < 1 || id > 14) {
+    throw new Error(`template_id inválido: "${raw}". Debe ser un número 1..14.`);
+  }
+
+  const fileName = TEMPLATE_MAP[id];
+  if (!fileName) {
+    throw new Error(`No hay mapping para template_id=${id}. Revisá TEMPLATE_MAP.`);
+  }
+
   const templatePath = path.join(TEMPLATES_DIR, fileName);
 
   if (!fs.existsSync(templatePath)) {
-    // Debug rápido de qué hay en templates/
     let list = [];
     try {
-      list = fs.readdirSync(TEMPLATES_DIR);
+      list = fs
+        .readdirSync(TEMPLATES_DIR)
+        .filter((f) => f.toLowerCase().endsWith(".pptx"));
     } catch (_) {}
     throw new Error(
       `No encuentro la plantilla: ${fileName} en ${TEMPLATES_DIR}. Disponibles: ${list.join(", ")}`
     );
   }
+
   return templatePath;
 }
 
-/* ---------------- mapeo data ---------------- */
+/* ---------------- data mapping ---------------- */
 
-/**
- * ✅ Soporta:
- * A) ANIDADO: { contact:{...}, experience:[...], skills:[...], education:[...], photo_url/photo_base64 }
- * B) PLANO:   { contact_email, exp_1_company, skill_1, edu_1_school, photo_url/photo_base64 }
- * C) ENVUELTO:{ data: {...} }
- */
 function flattenToTemplateData(body) {
-  const src = body?.data && typeof body.data === "object" ? body.data : body || {};
+  const src =
+    body?.data && typeof body.data === "object"
+      ? body.data
+      : body?.fields && typeof body.fields === "object"
+      ? body.fields
+      : body || {};
+
   const data = {};
 
-  // Header
-  data.name = clampLines(getAny(src, ["name", "Nombre completo", "nombre", "full_name"]), 22, 2);
-  data.title = clampLines(getAny(src, ["title", "Objetivo / rol buscado", "Puesto", "rol"]), 28, 2);
+  // OJO: template_id acá queda en data solo por si lo querés loguear o usar en pptx
+  data.template_id = getAny(src, ["template_id", "template", "Plantilla de CV"], "");
 
-  // 👇 PERFIL: acá es donde tocás los límites (antes 52,4)
-  // Recomendación: subir de a poco. Un valor "estable" suele ser 80 chars/linea y 6 lineas
-  data.about = clampLines(getAny(src, ["about", "Resumen profesional", "resumen"]), 80, 6);
+  data.name = clampLines(getAny(src, ["name", "Nombre completo", "full_name"]), 22, 2);
+  data.title = clampLines(getAny(src, ["title", "Objetivo / rol buscado", "Puesto"]), 28, 2);
+  data.about = clampLines(getAny(src, ["about", "Resumen profesional"]), 80, 6);
 
-  // Contacto
-  const c = src.contact && typeof src.contact === "object" ? src.contact : {};
-  data.contact_phone = clamp(
-    getAny(src, ["contact_phone", "Telefono", "Teléfono", "phone"], getAny(c, ["phone"])),
-    22
-  );
-  data.contact_email = clamp(
-    getAny(src, ["contact_email", "Email", "email"], getAny(c, ["email"])),
-    32
-  );
-  data.contact_location = clampLines(
-    getAny(src, ["contact_location", "Ubicacion", "Ubicación", "location"], getAny(c, ["location"])),
-    40,
-    2
-  );
-  data.contact_website = clamp(
-    getAny(src, ["contact_website", "Linkedin", "Portfolio", "GITHUB", "website"], getAny(c, ["website"])),
-    40
-  );
+  data.contact_phone = clamp(getAny(src, ["contact_phone", "Telefono", "Teléfono"]), 22);
+  data.contact_email = clamp(getAny(src, ["contact_email", "Email"]), 60);
+  data.contact_location = clampLines(getAny(src, ["contact_location", "Ubicacion", "Ubicación"]), 40, 2);
+  data.contact_website = clamp(getAny(src, ["contact_website", "Linkedin", "Portfolio", "GITHUB"]), 80);
 
-  // Educación (2)
-  const education = Array.isArray(src.education) ? src.education : [];
-  for (let i = 0; i < 2; i++) {
-    const n = i + 1;
-    const row = education[i] || {};
+  // Experiencia 1/2
+  for (let n = 1; n <= 2; n++) {
+    data[`exp_${n}_company`] = clampLines(getAny(src, [`exp_${n}_company`]), 26, 2);
+    data[`exp_${n}_role`] = clampLines(getAny(src, [`exp_${n}_role`]), 30, 2);
+    data[`exp_${n}_dates`] = clamp(getAny(src, [`exp_${n}_dates`]), 30);
 
-    const years = getAny(src, [`edu_${n}_years`], row.years || row.dates || row.period);
-    const school = getAny(src, [`edu_${n}_school`], row.institution || row.school || row.institucion);
-    const degree = getAny(src, [`edu_${n}_degree`], row.degree || row.area || row.career || row.carrera);
-
-    data[`edu_${n}_years`] = clamp(years, 40);
-    data[`edu_${n}_school`] = clampLines(school, 34, 2);
-    data[`edu_${n}_degree`] = clampLines(degree, 34, 2);
+    data[`exp_${n}_b1`] = clampLines(getAny(src, [`exp_${n}_b1`]), 42, 2);
+    data[`exp_${n}_b2`] = clampLines(getAny(src, [`exp_${n}_b2`]), 42, 2);
+    data[`exp_${n}_b3`] = clampLines(getAny(src, [`exp_${n}_b3`]), 42, 2);
   }
 
-  // Skills (7)
+  // Skills 1..7
   let skills = Array.isArray(src.skills) ? src.skills : [];
   if (!skills.length) skills = toArrayFromFlat(src, "skill_", 7);
   for (let i = 0; i < 7; i++) data[`skill_${i + 1}`] = clamp(skills[i], 26);
 
-  // Experiencia (2, 3 bullets)
-  const exp = Array.isArray(src.experience) ? src.experience : [];
-  for (let i = 0; i < 2; i++) {
-    const n = i + 1;
-    const e = exp[i] || {};
-
-    const company = getAny(src, [`exp_${n}_company`], e.company);
-    const role = getAny(src, [`exp_${n}_role`], e.role);
-    const dates = getAny(src, [`exp_${n}_dates`], e.dates);
-
-    data[`exp_${n}_company`] = clampLines(company, 26, 2);
-    data[`exp_${n}_role`] = clampLines(role, 30, 2);
-    data[`exp_${n}_dates`] = clamp(dates, 30);
-
-    let bullets = Array.isArray(e.bullets) ? e.bullets : [];
-    if (!bullets.length) {
-      bullets = [src[`exp_${n}_b1`], src[`exp_${n}_b2`], src[`exp_${n}_b3`]].filter(Boolean);
-    }
-
-    const b = asBullets(bullets, 3, 42);
-    for (let j = 0; j < 3; j++) data[`exp_${n}_b${j + 1}`] = b[j] || "";
+  // Educación 1/2
+  for (let n = 1; n <= 2; n++) {
+    data[`edu_${n}_school`] = clampLines(getAny(src, [`edu_${n}_school`]), 34, 2);
+    data[`edu_${n}_degree`] = clampLines(getAny(src, [`edu_${n}_degree`]), 34, 2);
+    data[`edu_${n}_years`] = clamp(getAny(src, [`edu_${n}_years`]), 40);
   }
 
-  // ✅ FOTO (lo importante)
-  // Tu PPTX debe tener {{photo}} en un textbox donde va la imagen.
-  data.photo_url = getAny(src, ["photo_url", "Foto URL", "foto_url"]);
-  data.photo_base64 = getAny(src, ["photo_base64", "Foto Base64", "foto_base64"]);
+  // Foto inputs
+  data.photo_url = getAny(src, ["photo_url", "photo" , "archivos_main"], "");
+  data.photo_base64 = getAny(src, ["photo_base64"], "");
 
-  // El tag real que usa el PPTX:
-  // {{photo}}
-  // El ImageModule llama a getImage con (tagValue, tagName)
-  // acá le pasamos un objeto para que getImage tenga todo.
-  data.photo = {
-    url: data.photo_url || "",
-    base64: data.photo_base64 || "",
-  };
+  // clave del tag de imagen
+  data.photo = null;
 
   return data;
 }
 
-/* ---------------- render docxtemplater + imagen ---------------- */
+/* ---------------- render PPTX ---------------- */
 
 function renderPptxFromTemplate(templateBuf, data) {
   const zip = new PizZip(templateBuf);
 
-  // ImageModule config
   const imageModule = new ImageModule({
     centered: false,
-    // tagValue: lo que le pasamos en data.photo
     getImage: (tagValue, tagName) => {
       if (tagName !== "photo") return null;
-
-      const b = tagValue?.base64 ? decodeBase64Image(tagValue.base64) : null;
-      if (b && b.length) return b;
-
-      // Si no hay base64, intentamos URL (pero ojo: esto debería ser sync en este módulo)
-      // Para mantenerlo simple y robusto: SOLO base64.
-      // Si querés URL sí o sí, lo resolvemos antes (en /generate-pdf) y lo metemos como base64.
+      if (Buffer.isBuffer(tagValue)) return tagValue;
+      if (typeof tagValue === "string" && tagValue.trim()) {
+        return decodeBase64Image(tagValue);
+      }
       return null;
     },
-    // tamaño de la foto final (px). Ajustalo a tu plantilla.
-    // Si tu foto queda chica/grande, cambiá estos números.
     getSize: () => [220, 220],
   });
 
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
+    // ⚠️ IMPORTANTE:
+    // Si usás placeholders {{name}} para texto, entonces la imagen debe ser {{%photo}}
     delimiters: { start: "{{", end: "}}" },
     modules: [imageModule],
   });
 
   doc.setData(data);
-
-  try {
-    doc.render();
-  } catch (err) {
-    const details =
-      err?.properties?.errors?.map((e) => ({
-        id: e.id,
-        explanation: e?.properties?.explanation,
-        tag: e?.properties?.xtag,
-      })) || [];
-    throw new Error(
-      `Error de template (PPTX): ${err.message}\nDETAILS: ${JSON.stringify(details, null, 2)}`
-    );
-  }
-
+  doc.render();
   return doc.getZip().generate({ type: "nodebuffer" });
 }
 
-/* ---------------- libreoffice convert ---------------- */
+/* ---------------- PPTX -> PDF ---------------- */
 
 function convertPptxToPdf(pptxPath, outDir) {
   return new Promise((resolve, reject) => {
@@ -361,26 +358,23 @@ app.post("/generate-pdf", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // 1) elegir plantilla
+    // ahora template_id esperado: "1".."14"
     const templateId = body.template_id || body.template || DEFAULT_TEMPLATE_ID;
     const templatePath = getTemplatePath(templateId);
     const templateBuf = fs.readFileSync(templatePath);
 
-    // 2) armar data
     const data = flattenToTemplateData(body);
 
-    // 3) si vino photo_url, la convertimos a base64 para que ImageModule sea robusto
-    if (!data.photo?.base64 && data.photo?.url) {
-      const buf = await fetchBufferFromUrl(data.photo.url);
-      if (buf && buf.length) {
-        data.photo.base64 = buf.toString("base64");
-      }
+    // ✅ FOTO (prioridad base64, que es tu flujo actual)
+    if (data.photo_base64) {
+      data.photo = data.photo_base64;
+    } else if (data.photo_url) {
+      const buf = await fetchBufferFromUrl(data.photo_url);
+      if (buf && buf.length) data.photo = buf;
     }
 
-    // 4) render PPTX
     const pptxBuf = renderPptxFromTemplate(templateBuf, data);
 
-    // 5) escribir temp + convertir
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cv-"));
     const id = crypto.randomBytes(8).toString("hex");
     const pptxPath = path.join(tmpDir, `cv-${id}.pptx`);
