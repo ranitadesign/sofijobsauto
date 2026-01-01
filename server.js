@@ -1,6 +1,7 @@
 // server.js
 // ✅ Genera PDF desde PPTX con Docxtemplater + ImageModule
 // ✅ FOTO: en el PPTX usar placeholder EXACTO: {{%photo}}
+// ✅ Texto: usar {{name}}, {{title}}, etc.
 // ✅ Acepta foto por: photo_base64 (recomendado) o photo_url
 
 const fs = require("fs");
@@ -39,26 +40,60 @@ const SOFFICE_PATH = process.env.SOFFICE_PATH || DEFAULT_SOFFICE;
 // Carpeta de plantillas PPTX
 const TEMPLATES_DIR = path.join(__dirname, "templates");
 
-// Template default (si no mandás template_id) -> ahora es numérico
+// Template default (si no mandás template_id)
 const DEFAULT_TEMPLATE_ID = process.env.DEFAULT_TEMPLATE_ID || "1";
 
-/* ---------------- utils texto ---------------- */
+/* =========================================================================
+   1) LIMITES GLOBALES (modo “no cortar por código”)
+   ========================================================================= */
+
+const LIMITS = {
+  // ✅ si está en false: el server NO recorta nada (sólo limpia/normaliza espacios)
+  ENABLE_CLAMP: false,
+
+  // Valores altos por si activás ENABLE_CLAMP = true
+  NAME_MAX_CHARS: 200,
+  TITLE_MAX_CHARS: 240,
+  ABOUT_MAX_CHARS_DEFAULT: 4000,
+
+  CONTACT_EMAIL_MAX: 180,
+  CONTACT_PHONE_MAX: 80,
+  CONTACT_LOCATION_MAX: 240,
+  CONTACT_WEBSITE_MAX: 220,
+
+  EXP_ROLE_MAX: 400,
+  EXP_COMPANY_MAX: 400,
+  EXP_DATES_MAX: 120,
+  EXP_BULLET_MAX: 800,
+
+  EDU_SCHOOL_MAX: 380,
+  EDU_DEGREE_MAX: 380,
+  EDU_YEARS_MAX: 120,
+
+  SKILL_MAX: 200,
+  ITEM_MAX: 260, // idiomas/it/cursos
+};
 
 function safeStr(v) {
   if (v === null || v === undefined) return "";
   return String(v).normalize("NFC");
 }
 
-function clamp(s, max) {
-  s = safeStr(s).trim();
-  if (!s) return "";
-  return s.length > max ? s.slice(0, Math.max(0, max - 1)).trimEnd() + "…" : s;
+// “plain”: no mete \n (mejor para que el textbox haga wrap natural)
+function maybeClampPlain(s, maxChars) {
+  const text = safeStr(s).replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (!LIMITS.ENABLE_CLAMP) return text;
+  if (!maxChars || maxChars <= 0) return text;
+  return text.length > maxChars ? text.slice(0, Math.max(0, maxChars - 1)).trimEnd() + "…" : text;
 }
 
-function clampLines(s, maxCharsPerLine, maxLines) {
-  s = safeStr(s).replace(/\s+/g, " ").trim();
-  if (!s) return "";
-  const words = s.split(" ");
+// “lines”: sólo si querés forzar líneas (yo lo evito para ABOUT)
+function maybeClampLines(s, maxCharsPerLine, maxLines) {
+  const text = safeStr(s).replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (!LIMITS.ENABLE_CLAMP) return text; // sin clamp: devolvemos sin forzar \n
+  const words = text.split(" ");
   const lines = [];
   let line = "";
 
@@ -76,16 +111,8 @@ function clampLines(s, maxCharsPerLine, maxLines) {
 
   let out = lines.join("\n");
   const rebuilt = lines.join(" ");
-  if (rebuilt.length < s.length) out = out.trimEnd() + "…";
+  if (rebuilt.length < text.length) out = out.trimEnd() + "…";
   return out;
-}
-
-function asBullets(arr, maxItems, maxCharsEach) {
-  const a = Array.isArray(arr) ? arr : [];
-  return a
-    .filter(Boolean)
-    .slice(0, maxItems)
-    .map((x) => clampLines(x, maxCharsEach, 2));
 }
 
 function getAny(obj, keys, fallback = "") {
@@ -96,58 +123,89 @@ function getAny(obj, keys, fallback = "") {
   return fallback;
 }
 
-function toArrayFromFlat(obj, prefix, maxN) {
+function toArrayFromFlat(obj, prefix, count) {
   const out = [];
-  for (let i = 1; i <= maxN; i++) {
-    const v = obj?.[`${prefix}${i}`];
-    if (v !== undefined && v !== null && String(v).trim() !== "") out.push(v);
+  for (let i = 1; i <= count; i++) out.push(safeStr(obj?.[`${prefix}${i}`]).trim());
+  return out.filter(Boolean);
+}
+
+function splitByCommonDelimiters(s) {
+  const raw = safeStr(s).trim();
+  if (!raw) return [];
+  return raw
+    .split(/[\n,;•]+/g)
+    .map((x) => x.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+/* =========================================================================
+   2) PERFIL POR PLANTILLA (ABOUT)
+   ========================================================================= */
+
+const TEMPLATE_PROFILES = {
+  // Por ahora: todos iguales (alto). Después ajustamos 1 por 1.
+  1: { about: { mode: "plain", maxChars: 4000 } },
+  2: { about: { mode: "plain", maxChars: 4000 } },
+  3: { about: { mode: "plain", maxChars: 4000 } },
+  4: { about: { mode: "plain", maxChars: 4000 } },
+  5: { about: { mode: "plain", maxChars: 4000 } },
+  6: { about: { mode: "plain", maxChars: 4000 } },
+  7: { about: { mode: "plain", maxChars: 4000 } },
+  8: { about: { mode: "plain", maxChars: 4000 } },
+  9: { about: { mode: "plain", maxChars: 4000 } },
+  10: { about: { mode: "plain", maxChars: 4000 } },
+  11: { about: { mode: "plain", maxChars: 4000 } },
+  12: { about: { mode: "plain", maxChars: 4000 } },
+  13: { about: { mode: "plain", maxChars: 4000 } },
+  14: { about: { mode: "plain", maxChars: 4000 } },
+  default: { about: { mode: "plain", maxChars: LIMITS.ABOUT_MAX_CHARS_DEFAULT } },
+};
+
+function getProfile(templateId) {
+  const id = Number((templateId ?? DEFAULT_TEMPLATE_ID).toString().trim());
+  return TEMPLATE_PROFILES[id] || TEMPLATE_PROFILES.default;
+}
+
+/* =========================================================================
+   3) IMÁGENES
+   ========================================================================= */
+
+function decodeBase64Image(base64) {
+  const s = safeStr(base64).trim();
+  if (!s) return null;
+  const m = s.match(/^data:(.+);base64,(.*)$/);
+  const payload = m ? m[2] : s;
+  try {
+    return Buffer.from(payload, "base64");
+  } catch {
+    return null;
   }
-  return out;
 }
 
-/* ---------------- utils imagen ---------------- */
-
-function decodeBase64Image(b64) {
-  if (!b64) return null;
-  const s = String(b64).trim();
-
-  // data:image/jpeg;base64,....
-  const m = s.match(/^data:(image\/\w+);base64,(.+)$/i);
-  if (m) return Buffer.from(m[2], "base64");
-
-  // base64 puro
-  return Buffer.from(s, "base64");
-}
-
-// Convierte links de Drive a descarga directa (para photo_url)
 function normalizeGoogleDriveUrl(url) {
-  if (!url) return "";
-  const u = String(url).trim();
+  const u = safeStr(url).trim();
+  if (!u) return "";
 
-  // file/d/ID
-  const m1 = u.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+  const m1 = u.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
   if (m1?.[1]) return `https://drive.google.com/uc?export=download&id=${m1[1]}`;
 
-  // open?id=ID
   const m2 = u.match(/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/);
   if (m2?.[1]) return `https://drive.google.com/uc?export=download&id=${m2[1]}`;
 
-  // cualquier URL con ?id=ID
   const idMatch = u.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  if (idMatch?.[1]) return `https://drive.google.com/uc?export=download&id=${idMatch[1]}`;
-
-  // ya es uc
-  if (u.includes("drive.google.com/uc")) return u;
+  if (u.includes("drive.google.com/uc") && idMatch?.[1]) {
+    return `https://drive.google.com/uc?export=download&id=${idMatch[1]}`;
+  }
 
   return u;
 }
 
-
 function fetchBufferFromUrl(url) {
   return new Promise((resolve, reject) => {
-    if (!url) return resolve(null);
+    const u = safeStr(url).trim();
+    if (!u) return resolve(null);
 
-    const finalUrl = normalizeGoogleDriveUrl(String(url).trim());
+    const finalUrl = normalizeGoogleDriveUrl(u);
     const lib = finalUrl.startsWith("https://") ? https : http;
 
     const req = lib.get(
@@ -156,7 +214,6 @@ function fetchBufferFromUrl(url) {
       (resp) => {
         const code = resp.statusCode || 0;
 
-        // redirects
         if (code >= 300 && code < 400 && resp.headers.location) {
           return resolve(fetchBufferFromUrl(resp.headers.location));
         }
@@ -173,15 +230,13 @@ function fetchBufferFromUrl(url) {
   });
 }
 
-/* ---------------- templates (MAPPING) ---------------- */
+/* =========================================================================
+   4) TEMPLATES
+   ========================================================================= */
 
-// 🔥 ACÁ ES DONDE DEFINÍS QUÉ ARCHIVO USA CADA MODELO
-// Poné EXACTAMENTE el nombre del .pptx tal como está dentro de /templates
 const TEMPLATE_MAP = {
   1: "Plantilla_oficial_1_verde.pptx",
   2: "Template_2_moderno.pptx",
-
-  // 👇 completá estos con tus nombres reales
   3: "Template_3_oficial.pptx",
   4: "PONER_NOMBRE_REAL_4.pptx",
   5: "PONER_NOMBRE_REAL_5.pptx",
@@ -189,9 +244,7 @@ const TEMPLATE_MAP = {
   7: "PONER_NOMBRE_REAL_7.pptx",
   8: "PONER_NOMBRE_REAL_8.pptx",
   9: "PONER_NOMBRE_REAL_9.pptx",
-
   10: "Currículum Vitae Cv de Marketing Minimalista Beige (2).pptx",
-
   11: "PONER_NOMBRE_REAL_11.pptx",
   12: "PONER_NOMBRE_REAL_12.pptx",
   13: "PONER_NOMBRE_REAL_13.pptx",
@@ -208,18 +261,14 @@ function getTemplatePath(templateId) {
   }
 
   const fileName = TEMPLATE_MAP[id];
-  if (!fileName) {
-    throw new Error(`No hay mapping para template_id=${id}. Revisá TEMPLATE_MAP.`);
-  }
+  if (!fileName) throw new Error(`No hay mapping para template_id=${id}. Revisá TEMPLATE_MAP.`);
 
   const templatePath = path.join(TEMPLATES_DIR, fileName);
 
   if (!fs.existsSync(templatePath)) {
     let list = [];
     try {
-      list = fs
-        .readdirSync(TEMPLATES_DIR)
-        .filter((f) => f.toLowerCase().endsWith(".pptx"));
+      list = fs.readdirSync(TEMPLATES_DIR).filter((f) => f.toLowerCase().endsWith(".pptx"));
     } catch (_) {}
     throw new Error(
       `No encuentro la plantilla: ${fileName} en ${TEMPLATES_DIR}. Disponibles: ${list.join(", ")}`
@@ -229,7 +278,66 @@ function getTemplatePath(templateId) {
   return templatePath;
 }
 
-/* ---------------- data mapping ---------------- */
+/* =========================================================================
+   5) ANTI-UNDEFINED: completar claves faltantes con ""
+   ========================================================================= */
+
+function fillMissingKeys(data) {
+  // Base
+  const baseKeys = [
+    "template_id",
+    "name",
+    "title",
+    "about",
+    "contact_phone",
+    "contact_email",
+    "contact_location",
+    "contact_website",
+    "idiomas_raw",
+    "it_raw",
+    "cursos_raw",
+    "photo_base64",
+    "photo_url",
+  ];
+  for (const k of baseKeys) if (!(k in data)) data[k] = "";
+
+  // Skills 1..7
+  for (let i = 1; i <= 7; i++) if (!(`skill_${i}` in data)) data[`skill_${i}`] = "";
+
+  // Idiomas/IT/Cursos 1..5
+  for (let i = 1; i <= 5; i++) {
+    if (!(`idioma_${i}` in data)) data[`idioma_${i}`] = "";
+    if (!(`it_${i}` in data)) data[`it_${i}`] = "";
+    if (!(`curso_${i}` in data)) data[`curso_${i}`] = "";
+  }
+
+  // Educación 1..3
+  for (let n = 1; n <= 3; n++) {
+    for (const k of [`edu_${n}_school`, `edu_${n}_degree`, `edu_${n}_years`]) {
+      if (!(k in data)) data[k] = "";
+    }
+  }
+
+  // Experiencia 1..3 + bullets b1..b9 (para evitar undefined en templates “largos”)
+  for (let n = 1; n <= 3; n++) {
+    for (const k of [`exp_${n}_company`, `exp_${n}_role`, `exp_${n}_dates`]) {
+      if (!(k in data)) data[k] = "";
+    }
+    for (let b = 1; b <= 9; b++) {
+      const kb = `exp_${n}_b${b}`;
+      if (!(kb in data)) data[kb] = "";
+    }
+  }
+
+  // Foto (tag imagen)
+  if (!("photo" in data)) data.photo = null;
+
+  return data;
+}
+
+/* =========================================================================
+   6) DATA MAPPING
+   ========================================================================= */
 
 function flattenToTemplateData(body) {
   const src =
@@ -241,52 +349,87 @@ function flattenToTemplateData(body) {
 
   const data = {};
 
-  // OJO: template_id acá queda en data solo por si lo querés loguear o usar en pptx
-  data.template_id = getAny(src, ["template_id", "template", "Plantilla de CV"], "");
+  // Base
+  data.template_id = safeStr(getAny(src, ["template_id", "template", "templateId"]));
+  data.photo_url = safeStr(getAny(src, ["photo_url"])); // IMPORTANT: no tocar
+  data.photo_base64 = safeStr(getAny(src, ["photo_base64"]));
+  data.photo = null;
 
-  data.name = clampLines(getAny(src, ["name", "Nombre completo", "full_name"]), 22, 2);
-  data.title = clampLines(getAny(src, ["title", "Objetivo / rol buscado", "Puesto"]), 28, 2);
-  data.about = clampLines(getAny(src, ["about", "Resumen profesional"]), 80, 6);
+  // Nombre / title (sin recorte por default; si activás ENABLE_CLAMP, corta alto)
+  data.name = maybeClampPlain(getAny(src, ["name"]), LIMITS.NAME_MAX_CHARS);
+  data.title = maybeClampPlain(getAny(src, ["title"]), LIMITS.TITLE_MAX_CHARS);
 
-  data.contact_phone = clamp(getAny(src, ["contact_phone", "Telefono", "Teléfono"]), 22);
-  data.contact_email = clamp(getAny(src, ["contact_email", "Email"]), 60);
-  data.contact_location = clampLines(getAny(src, ["contact_location", "Ubicacion", "Ubicación"]), 40, 2);
-  data.contact_website = clamp(getAny(src, ["contact_website", "Linkedin", "Portfolio", "GITHUB"]), 80);
+  // ✅ ABOUT por plantilla (preferimos plain para que haga wrap natural)
+  const templateId = getAny(src, ["template_id", "template", "templateId"], DEFAULT_TEMPLATE_ID);
+  const profile = getProfile(templateId);
+  const aboutCfg = profile?.about || TEMPLATE_PROFILES.default.about;
 
-  // Experiencia 1/2
-  for (let n = 1; n <= 2; n++) {
-    data[`exp_${n}_company`] = clampLines(getAny(src, [`exp_${n}_company`]), 26, 2);
-    data[`exp_${n}_role`] = clampLines(getAny(src, [`exp_${n}_role`]), 30, 2);
-    data[`exp_${n}_dates`] = clamp(getAny(src, [`exp_${n}_dates`]), 30);
+  if (aboutCfg.mode === "lines") {
+    data.about = maybeClampLines(
+      getAny(src, ["about"]),
+      aboutCfg.maxCharsPerLine || 120,
+      aboutCfg.maxLines || 12
+    );
+  } else {
+    data.about = maybeClampPlain(getAny(src, ["about"]), aboutCfg.maxChars || LIMITS.ABOUT_MAX_CHARS_DEFAULT);
+  }
 
-    data[`exp_${n}_b1`] = clampLines(getAny(src, [`exp_${n}_b1`]), 42, 2);
-    data[`exp_${n}_b2`] = clampLines(getAny(src, [`exp_${n}_b2`]), 42, 2);
-    data[`exp_${n}_b3`] = clampLines(getAny(src, [`exp_${n}_b3`]), 42, 2);
+  data.contact_phone = maybeClampPlain(getAny(src, ["contact_phone"]), LIMITS.CONTACT_PHONE_MAX);
+  data.contact_email = maybeClampPlain(getAny(src, ["contact_email"]), LIMITS.CONTACT_EMAIL_MAX);
+  data.contact_location = maybeClampPlain(getAny(src, ["contact_location"]), LIMITS.CONTACT_LOCATION_MAX);
+  data.contact_website = maybeClampPlain(getAny(src, ["contact_website"]), LIMITS.CONTACT_WEBSITE_MAX);
+
+  // Experiencia 1..3
+  for (let n = 1; n <= 3; n++) {
+    data[`exp_${n}_company`] = maybeClampPlain(getAny(src, [`exp_${n}_company`]), LIMITS.EXP_COMPANY_MAX);
+    data[`exp_${n}_role`] = maybeClampPlain(getAny(src, [`exp_${n}_role`]), LIMITS.EXP_ROLE_MAX);
+    data[`exp_${n}_dates`] = maybeClampPlain(getAny(src, [`exp_${n}_dates`]), LIMITS.EXP_DATES_MAX);
+
+    // Bullets b1..b9 (si no vienen, quedan vacíos por fillMissingKeys)
+    for (let b = 1; b <= 9; b++) {
+      data[`exp_${n}_b${b}`] = maybeClampPlain(getAny(src, [`exp_${n}_b${b}`]), LIMITS.EXP_BULLET_MAX);
+    }
   }
 
   // Skills 1..7
-  let skills = Array.isArray(src.skills) ? src.skills : [];
+  let skills = [];
+  if (Array.isArray(src.skills)) skills = src.skills.map((x) => safeStr(x).trim()).filter(Boolean);
   if (!skills.length) skills = toArrayFromFlat(src, "skill_", 7);
-  for (let i = 0; i < 7; i++) data[`skill_${i + 1}`] = clamp(skills[i], 26);
+  for (let i = 0; i < 7; i++) data[`skill_${i + 1}`] = maybeClampPlain(skills[i] || "", LIMITS.SKILL_MAX);
 
-  // Educación 1/2
-  for (let n = 1; n <= 2; n++) {
-    data[`edu_${n}_school`] = clampLines(getAny(src, [`edu_${n}_school`]), 34, 2);
-    data[`edu_${n}_degree`] = clampLines(getAny(src, [`edu_${n}_degree`]), 34, 2);
-    data[`edu_${n}_years`] = clamp(getAny(src, [`edu_${n}_years`]), 40);
+  // Educación 1..3
+  for (let n = 1; n <= 3; n++) {
+    data[`edu_${n}_school`] = maybeClampPlain(getAny(src, [`edu_${n}_school`]), LIMITS.EDU_SCHOOL_MAX);
+    data[`edu_${n}_degree`] = maybeClampPlain(getAny(src, [`edu_${n}_degree`]), LIMITS.EDU_DEGREE_MAX);
+    data[`edu_${n}_years`] = maybeClampPlain(getAny(src, [`edu_${n}_years`]), LIMITS.EDU_YEARS_MAX);
   }
 
-  // Foto inputs
-  data.photo_url = getAny(src, ["photo_url", "photo" , "archivos_main"], "");
-  data.photo_base64 = getAny(src, ["photo_base64"], "");
+  // RAW + PARTES (idiomas/it/cursos)
+  data.idiomas_raw = maybeClampPlain(getAny(src, ["idiomas_raw"]), 5000);
+  data.it_raw = maybeClampPlain(getAny(src, ["it_raw"]), 5000);
+  data.cursos_raw = maybeClampPlain(getAny(src, ["cursos_raw"]), 5000);
 
-  // clave del tag de imagen
-  data.photo = null;
+  // Si ya vienen items, los respetamos; si no, derivamos del raw
+  const anyIdioma = safeStr(getAny(src, ["idioma_1", "idioma_2", "idioma_3"])).trim();
+  const anyIt = safeStr(getAny(src, ["it_1", "it_2", "it_3"])).trim();
+  const anyCurso = safeStr(getAny(src, ["curso_1", "curso_2", "curso_3"])).trim();
 
-  return data;
+  const idiomasParts = splitByCommonDelimiters(anyIdioma ? "" : data.idiomas_raw);
+  const itParts = splitByCommonDelimiters(anyIt ? "" : data.it_raw);
+  const cursoParts = splitByCommonDelimiters(anyCurso ? "" : data.cursos_raw);
+
+  for (let i = 1; i <= 5; i++) {
+    data[`idioma_${i}`] = maybeClampPlain(getAny(src, [`idioma_${i}`], idiomasParts[i - 1] || ""), LIMITS.ITEM_MAX);
+    data[`it_${i}`] = maybeClampPlain(getAny(src, [`it_${i}`], itParts[i - 1] || ""), LIMITS.ITEM_MAX);
+    data[`curso_${i}`] = maybeClampPlain(getAny(src, [`curso_${i}`], cursoParts[i - 1] || ""), LIMITS.ITEM_MAX);
+  }
+
+  return fillMissingKeys(data);
 }
 
-/* ---------------- render PPTX ---------------- */
+/* =========================================================================
+   7) RENDER PPTX
+   ========================================================================= */
 
 function renderPptxFromTemplate(templateBuf, data) {
   const zip = new PizZip(templateBuf);
@@ -296,21 +439,20 @@ function renderPptxFromTemplate(templateBuf, data) {
     getImage: (tagValue, tagName) => {
       if (tagName !== "photo") return null;
       if (Buffer.isBuffer(tagValue)) return tagValue;
-      if (typeof tagValue === "string" && tagValue.trim()) {
-        return decodeBase64Image(tagValue);
-      }
+      if (typeof tagValue === "string" && tagValue.trim()) return decodeBase64Image(tagValue);
       return null;
     },
-    getSize: () => [220, 220],
+    getSize: () => [520, 520],
   });
 
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
-    // ⚠️ IMPORTANTE:
-    // Si usás placeholders {{name}} para texto, entonces la imagen debe ser {{%photo}}
     delimiters: { start: "{{", end: "}}" },
     modules: [imageModule],
+
+    // ✅ CLAVE: si falta un placeholder → vacío (nunca "undefined")
+    nullGetter: () => "",
   });
 
   doc.setData(data);
@@ -318,7 +460,9 @@ function renderPptxFromTemplate(templateBuf, data) {
   return doc.getZip().generate({ type: "nodebuffer" });
 }
 
-/* ---------------- PPTX -> PDF ---------------- */
+/* =========================================================================
+   8) PPTX -> PDF
+   ========================================================================= */
 
 function convertPptxToPdf(pptxPath, outDir) {
   return new Promise((resolve, reject) => {
@@ -352,20 +496,21 @@ function convertPptxToPdf(pptxPath, outDir) {
   });
 }
 
-/* ---------------- endpoint ---------------- */
+/* =========================================================================
+   9) ENDPOINT
+   ========================================================================= */
 
 app.post("/generate-pdf", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // ahora template_id esperado: "1".."14"
     const templateId = body.template_id || body.template || DEFAULT_TEMPLATE_ID;
     const templatePath = getTemplatePath(templateId);
     const templateBuf = fs.readFileSync(templatePath);
 
     const data = flattenToTemplateData(body);
 
-    // ✅ FOTO (prioridad base64, que es tu flujo actual)
+    // ✅ FOTO: prioridad base64, si no URL
     if (data.photo_base64) {
       data.photo = data.photo_base64;
     } else if (data.photo_url) {
@@ -387,7 +532,11 @@ app.post("/generate-pdf", async (req, res) => {
     res.setHeader("Content-Disposition", 'attachment; filename="cv.pdf"');
     res.status(200).send(pdfBuf);
   } catch (err) {
-    res.status(500).json({ error: String(err.message || err) });
+    console.error(err);
+    res.status(500).json({
+      error: String(err?.message || err),
+      stack: String(err?.stack || ""),
+    });
   }
 });
 
@@ -396,4 +545,5 @@ app.listen(PORT, () => {
   console.log(`CV API OK en http://127.0.0.1:${PORT}`);
   console.log(`Templates dir: ${TEMPLATES_DIR}`);
   console.log(`LibreOffice: ${SOFFICE_PATH}`);
+  console.log(`ENABLE_CLAMP: ${LIMITS.ENABLE_CLAMP}`);
 });
