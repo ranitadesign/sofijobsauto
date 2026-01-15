@@ -5,4 +5,8 @@ node_modules/
 *.pptx
 !template.pptx
 !templates/*.pptx
+*.rar
+*.zip
+.~lock.*
+*.txt
 
