@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
+# Dependencies (incl. archiver) – change this line to force cache invalidation if needed
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev \
+  && node -e "require('archiver')" || (echo "FATAL: archiver not installed" && exit 1)
 
 COPY . .
 
