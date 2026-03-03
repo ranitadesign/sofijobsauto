@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "docs:html": "node scripts/md-to-html.js",
+    "docs:pdf": "npx md-to-pdf docs/DOCUMENTACION_FLUJO_CV_PPTX_API.md"
   },
   "keywords": [],
   "author": "",
@@ -20,5 +22,8 @@
     "pizzip": "^3.2.0",
     "pptxgenjs": "^4.0.1",
     "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "marked": "^17.0.3"
   }
 }

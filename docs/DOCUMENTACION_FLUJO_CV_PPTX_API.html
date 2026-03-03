@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Documentación CV PPTX API</title>
+  <style>
+    body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; line-height: 1.5; color: #1a1a1a; }
+    h1 { border-bottom: 2px solid #c0504d; padding-bottom: 0.3em; }
+    h2 { margin-top: 1.8em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
+    h3 { margin-top: 1.2em; }
+    code { background: #f4f4f4; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; border-radius: 6px; }
+    pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+    th, td { border: 1px solid #ddd; padding: 0.5em 0.75em; text-align: left; }
+    th { background: #f0f0f0; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+    @media print { body { max-width: none; } }
+  </style>
+</head>
+<body>
+<h1>Documentación completa: CV PPTX API — Flujo y arquitectura</h1>
+<p><strong>Proyecto:</strong> cv-pptx-api (Sofijobs automatización)<br><strong>Versión:</strong> 1.0.0<br><strong>Última actualización:</strong> Marzo 2026</p>
+<hr>
+<h2>1. Introducción y propósito</h2>
+<p>La <strong>CV PPTX API</strong> es un servicio backend que:</p>
+<ul>
+<li>Recibe datos de currículum (nombre, título, experiencia, educación, contacto, foto, color de acento, etc.).</li>
+<li>Elige una <strong>plantilla PPTX</strong> según <code>template_id</code> y la cantidad de experiencias (variantes v1–v7).</li>
+<li>Rellena la plantilla con <strong>Docxtemplater</strong> usando placeholders <code>{{name}}</code>, <code>{{title}}</code>, <code>{{%photo}}</code>, etc.</li>
+<li>Aplica <strong>color de acento</strong> (reemplazo de colores sentinela en todos los XML del PPTX).</li>
+<li>Procesa la <strong>foto</strong> (recorte circular, eliminación de fondo blanco si aplica).</li>
+<li>Genera <strong>PDF</strong> (vía LibreOffice) y opcionalmente <strong>JPG</strong> con marca de agua.</li>
+<li>Expone endpoints para descargar: <strong>ZIP (PDF + JPG)</strong>, <strong>solo PDF</strong> o <strong>solo JPG</strong>.</li>
+</ul>
+<p>Todo el flujo está pensado para integrarse con formularios o sistemas que envían un JSON con los datos del CV.</p>
+<hr>
+<h2>2. Arquitectura general</h2>
+<pre><code>Cliente (POST JSON)
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Express (server.js)                                              │
+│  • CORS, express.json({ limit: &quot;60mb&quot; })                          │
+│  • Rutas: /health, /generate-pdf, /generate-only-pdf,             │
+│           /generate-only-jpg                                      │
+└──────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  1) getSrcFromBody(body) → datos crudos (body.data / body.fields) │
+│  2) template_id + expCount → getTemplatePath() → archivo .pptx     │
+│  3) flattenToTemplateData(body) → data normalizado para plantilla │
+│  4) Foto: photo_base64 o photo_url → buildFinalPhotoPng() → PNG    │
+│     circular con alpha (keying de fondo blanco si aplica)         │
+│  5) renderPptxFromTemplate(templateBuf, data)                      │
+│     • Docxtemplater + ImageModule                                 │
+│     • Reemplazo SENTINEL_HEX → color sidebar                       │
+│     • Reemplazo TEXT_SENTINEL_HEX → color texto sidebar           │
+│     • patchShapesByMarker (wrap, horzOverflow, noAutofit)          │
+│  6) Escribir PPTX en directorio temporal                          │
+│  7) LibreOffice: convertPptxToPdf() y/o convertPptxToPng()         │
+│  8) (Opcional) applyTiledWatermarkToJpg() → JPG con &quot;SOFIJOBS&quot;    │
+│  9) Respuesta: ZIP (PDF+JPG), o solo PDF, o solo JPG              │
+└──────────────────────────────────────────────────────────────────┘
+</code></pre>
+<ul>
+<li><strong>Entrada:</strong> JSON en el body (o anidado en <code>body.data</code> / <code>body.fields</code>).</li>
+<li><strong>Salida:</strong> archivo binario (ZIP, PDF o JPG) con <code>Content-Disposition: attachment</code>.</li>
+</ul>
+<hr>
+<h2>3. Dependencias (package.json)</h2>
+<table>
+<thead>
+<tr>
+<th>Paquete</th>
+<th>Uso</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>express</strong></td>
+<td>Servidor HTTP y rutas.</td>
+</tr>
+<tr>
+<td><strong>cors</strong></td>
+<td>Habilitar CORS para llamadas desde frontend.</td>
+</tr>
+<tr>
+<td><strong>sharp</strong></td>
+<td>Procesamiento de imagen: redimensionar, alpha, keying de fondo, máscara circular.</td>
+</tr>
+<tr>
+<td><strong>archiver</strong></td>
+<td>Crear ZIP en memoria para <code>/generate-pdf</code> (PDF + JPG).</td>
+</tr>
+<tr>
+<td><strong>pizzip</strong></td>
+<td>Leer/escribir PPTX (ZIP con XML).</td>
+</tr>
+<tr>
+<td><strong>docxtemplater</strong></td>
+<td>Sustituir placeholders en PPTX (XML interno).</td>
+</tr>
+<tr>
+<td><strong>docxtemplater-image-module-free</strong></td>
+<td>Inserción de imágenes (foto, iconos) en plantilla.</td>
+</tr>
+<tr>
+<td><strong>node-fetch</strong></td>
+<td>No usado directamente en server.js; puede usarse en otros módulos.</td>
+</tr>
+<tr>
+<td><strong>pptxgenjs</strong></td>
+<td>Declarado; la generación real se hace con plantillas + Docxtemplater.</td>
+</tr>
+</tbody></table>
+<p>En producción el Dockerfile ejecuta <code>npm ci --omit=dev</code>, por lo que <strong>todas</strong> las dependencias de runtime deben estar en <code>dependencies</code> (incluido <code>archiver</code>).</p>
+<hr>
+<h2>4. Variables de entorno</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Descripción</th>
+<th>Valor por defecto</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>PORT</strong></td>
+<td>Puerto HTTP del servidor.</td>
+<td><code>3000</code></td>
+</tr>
+<tr>
+<td><strong>DEFAULT_TEMPLATE_ID</strong></td>
+<td>Plantilla por defecto si no se envía <code>template_id</code>.</td>
+<td><code>&quot;1&quot;</code></td>
+</tr>
+<tr>
+<td><strong>SOFFICE_PATH</strong></td>
+<td>Ruta al ejecutable de LibreOffice (soffice).</td>
+<td>Windows: <code>C:\Program Files\LibreOffice\program\soffice.exe</code>; Linux: <code>soffice</code></td>
+</tr>
+<tr>
+<td><strong>SENTINEL_HEX</strong></td>
+<td>Color sentinela en el PPTX para fondo del sidebar/acentos. Se reemplaza por el color elegido.</td>
+<td><code>c0504d</code></td>
+</tr>
+<tr>
+<td><strong>TEXT_SENTINEL_HEX</strong></td>
+<td>Color sentinela para texto del sidebar (se reemplaza por blanco o negro según contraste).</td>
+<td><code>543F3F</code></td>
+</tr>
+<tr>
+<td><strong>DEBUG_COLOR</strong></td>
+<td>Si <code>&quot;1&quot;</code>, se loguean los archivos XML tocados en el reemplazo de color.</td>
+<td>(vacío)</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>5. Estructura del proyecto</h2>
+<pre><code>cv-pptx-api/
+├── server.js              # Punto de entrada; toda la lógica de API y flujo
+├── package.json
+├── package-lock.json
+├── dockerfile             # Imagen Node 20 + LibreOffice + npm ci
+├── templates/              # Plantillas PPTX (Plantilla_oficial_*_v*.pptx)
+├── assets/
+│   └── icons/             # Iconos sidebar: light/ y dark/ (phone.png, mail.png, etc.)
+├── docs/
+│   └── DOCUMENTACION_FLUJO_CV_PPTX_API.md / .pdf
+└── (opcional) .dockerignore, .gitignore, README.md
+</code></pre>
+<p>Las plantillas se nombran según <code>TEMPLATE_VARIANTS</code> en server.js (ver sección 8).</p>
+<hr>
+<h2>6. Endpoints de la API</h2>
+<h3>6.1 GET <code>/health</code></h3>
+<ul>
+<li><strong>Respuesta:</strong> <code>{ &quot;ok&quot;: true }</code>.</li>
+<li>Uso: comprobar que el servicio está vivo (Render, load balancers, etc.).</li>
+</ul>
+<h3>6.2 POST <code>/generate-pdf</code></h3>
+<ul>
+<li><strong>Body:</strong> JSON con datos del CV (ver sección 9). Acepta hasta <strong>60 MB</strong> (para foto en base64).</li>
+<li><strong>Respuesta:</strong> archivo ZIP (<code>application/zip</code>) con:<ul>
+<li><code>{nombreSeguro}.pdf</code> — CV en PDF.</li>
+<li><code>{nombreSeguro}.jpg</code> — Primera página como JPG con marca de agua &quot;SOFIJOBS&quot;.</li>
+</ul>
+</li>
+<li><strong>Nombre del archivo ZIP:</strong> <code>{nombreSeguro}_pack.zip</code> (nombre derivado de <code>name</code>/<code>nombre</code> del body, sanitizado).</li>
+</ul>
+<h3>6.3 POST <code>/generate-only-pdf</code></h3>
+<ul>
+<li><strong>Body:</strong> mismo JSON que <code>/generate-pdf</code>.</li>
+<li><strong>Respuesta:</strong> solo el PDF (<code>application/pdf</code>), nombre <code>{nombreSeguro}.pdf</code>.</li>
+</ul>
+<h3>6.4 POST <code>/generate-only-jpg</code></h3>
+<ul>
+<li><strong>Body:</strong> mismo JSON que <code>/generate-pdf</code>.</li>
+<li><strong>Respuesta:</strong> solo el JPG con marca de agua (<code>image/jpeg</code>), nombre <code>{nombreSeguro}.jpg</code>.</li>
+</ul>
+<p>En todos los endpoints POST, si ocurre un error se devuelve <code>500</code> con cuerpo JSON: <code>{ error: string, stack: string }</code>.</p>
+<hr>
+<h2>7. Flujo detallado paso a paso</h2>
+<ol>
+<li><p><strong>Recepción del body</strong><br>Se toma <code>req.body</code>. Si viene <code>body.data</code> o <code>body.fields</code> (objeto), se usa como fuente de datos; si no, se usa <code>body</code> directamente (<code>getSrcFromBody</code>).</p>
+</li>
+<li><p><strong>Identificación de plantilla y variante</strong>  </p>
+<ul>
+<li><code>template_id</code>: de body o de <code>src</code> (por defecto <code>DEFAULT_TEMPLATE_ID</code>, ej. 1).  </li>
+<li>Se cuenta la cantidad de experiencias con <code>countExperiencesFromSrc(src, 7)</code> (máximo 7).  </li>
+<li>Se considera la preferencia de “CV en 2 páginas” (<code>getTwoPagesAnswerFromSrc</code> → <code>normalizeTwoPagesAnswer</code>).  </li>
+<li>Si la respuesta es &quot;No, por favor que sea de una página&quot; o &quot;Sólo si lo consideran estrictamente necesario...&quot; → se fuerza variante de 1 página (equivalente a cap 5 experiencias).  </li>
+<li>Si es &quot;Sí, prefiero que esté bien desarrollado...&quot; y el template permite 2 páginas → se usa hasta 6 o 7 experiencias.  </li>
+<li><code>capExpCountForTemplate(templateId, expCount)</code> limita según si el template es de 2 páginas (9, 11, 12, 13) o no.  </li>
+<li>Con <code>template_id</code> y <code>expCountForVariant</code> se resuelve el archivo .pptx con <code>getTemplatePath(templateId, expCountForVariant)</code> (ver sección 8).</li>
+</ul>
+</li>
+<li><p><strong>Datos para la plantilla</strong><br><code>flattenToTemplateData(body)</code> construye el objeto <code>data</code> que Docxtemplater usará: normaliza nombres de campos, aplica límites de caracteres, formatea educación, experiencia, idiomas, IT, cursos, sidebar, contacto, etc. (ver sección 9).</p>
+</li>
+<li><p><strong>Foto</strong>  </p>
+<ul>
+<li>Si hay <code>photo_base64</code> (o alias): se decodifica con <code>decodeBase64Image</code>.  </li>
+<li>Si hay <code>photo_url</code>: se descarga con <code>fetchBufferFromUrl</code> (soporta Google Drive con normalización de URL).  </li>
+<li>Con el buffer se llama a <code>buildFinalPhotoPng(photoBuf, { W, H })</code> (tamaño por <code>TEMPLATE_PROFILES[template_id].photoSize</code>): recorte, detección de fondo claro, keying a alpha, redimensionado y máscara circular.  </li>
+<li>El resultado se asigna a <code>data.photo</code> en formato <code>data:image/png;base64,...</code> para el ImageModule.</li>
+</ul>
+</li>
+<li><p><strong>Render del PPTX</strong>  </p>
+<ul>
+<li>Se lee el archivo de plantilla desde disco.  </li>
+<li><code>renderPptxFromTemplate(templateBuf, data)</code>:  <ul>
+<li>Calcula color de acento con <code>resolveAccentHex(data.accent_color_raw)</code> y color de texto del sidebar (<code>pickTextColorForSidebar</code>).  </li>
+<li>Configura ImageModule (getImage, getSize) para la etiqueta <code>photo</code> y para iconos.  </li>
+<li>Docxtemplater rellena todos los placeholders.  </li>
+<li><code>replaceColorInAllXml</code> reemplaza <code>SENTINEL_HEX</code> por el color del sidebar y <code>TEXT_SENTINEL_HEX</code> por el color de texto.  </li>
+<li>Se aplican parches de sidebar (<code>patchShapesByMarker</code> con <code>__SB_TITLE__</code> y <code>__SB_BODY__</code>: wrap, horzOverflow clip, noAutofit).  </li>
+<li>Se compacta espaciado en shapes de educación y se eliminan párrafos con viñetas vacíos.</li>
+</ul>
+</li>
+<li>El buffer PPTX resultante se escribe en un directorio temporal.</li>
+</ul>
+</li>
+<li><p><strong>Conversión a PDF y PNG</strong>  </p>
+<ul>
+<li><code>convertPptxToPdf(pptxPath, tmpDir)</code>: ejecuta LibreOffice en headless (<code>--convert-to pdf</code>).  </li>
+<li>Para ZIP o JPG: <code>convertPptxToPng(pptxPath, tmpDir)</code> genera PNG(s); se toma el primero ordenado.</li>
+</ul>
+</li>
+<li><p><strong>JPG con marca de agua</strong>  </p>
+<ul>
+<li><code>applyTiledWatermarkToJpg(pngPath, jpgOut, { text: &quot;SOFIJOBS&quot;, ... })</code>: usando Sharp y un SVG con patrón de texto, se genera el JPG final.</li>
+</ul>
+</li>
+<li><p><strong>Respuesta</strong>  </p>
+<ul>
+<li><code>/generate-pdf</code>: se usa <code>archiver</code> para crear un ZIP en memoria con el PDF y el JPG y se envía con <code>Content-Disposition: attachment; filename=&quot;..._pack.zip&quot;</code>.  </li>
+<li><code>/generate-only-pdf</code>: se envía el buffer PDF.  </li>
+<li><code>/generate-only-jpg</code>: se envía el buffer JPG.</li>
+</ul>
+</li>
+</ol>
+<p>Los archivos temporales quedan en el sistema de archivos del servidor (en producción suele limpiarse al terminar la request o por el SO).</p>
+<hr>
+<h2>8. Sistema de plantillas (template_id y variantes v1–v7)</h2>
+<h3>8.1 Template ID</h3>
+<ul>
+<li><strong>template_id</strong> válido: <strong>1 a 14</strong>.  </li>
+<li>Se puede enviar como <code>template_id</code>, <code>template</code> o <code>templateId</code> en el body o dentro de <code>data</code>/<code>fields</code>.  </li>
+<li>Si no se envía, se usa <code>DEFAULT_TEMPLATE_ID</code> (por defecto <code>&quot;1&quot;</code>).</li>
+</ul>
+<h3>8.2 Variantes por cantidad de experiencias</h3>
+<p>Cada template_id tiene hasta 7 variantes de archivo PPTX (v1–v7), según cuántas experiencias tenga el CV:</p>
+<table>
+<thead>
+<tr>
+<th>Experiencias</th>
+<th>Variante</th>
+<th>Uso típico</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0–1</td>
+<td>v1</td>
+<td>Poca experiencia</td>
+</tr>
+<tr>
+<td>2</td>
+<td>v2</td>
+<td>2 experiencias</td>
+</tr>
+<tr>
+<td>3</td>
+<td>v3</td>
+<td>3 experiencias (base)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>v4</td>
+<td>4 experiencias</td>
+</tr>
+<tr>
+<td>5</td>
+<td>v5</td>
+<td>5 experiencias (1 página)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>v6</td>
+<td>6 experiencias (2 páginas)</td>
+</tr>
+<tr>
+<td>7+</td>
+<td>v7</td>
+<td>7 experiencias (2 páginas)</td>
+</tr>
+</tbody></table>
+<ul>
+<li>La función <code>wantedVariantKeyByExpCount(expCount)</code> devuelve la clave (v1–v7).  </li>
+<li><code>pickVariantFileName(templateId, expCount)</code> busca en <code>TEMPLATE_VARIANTS[templateId]</code> el archivo correspondiente; si no existe esa variante, prueba otras en orden de cercanía y finalmente fallback a v3 o al primer archivo existente.  </li>
+<li><strong>Templates de 2 páginas:</strong> solo los <strong>template_id 9, 11, 12 y 13</strong> pueden usar v6/v7 (6–7 experiencias). Para el resto, <code>capExpCountForTemplate</code> limita a 5 experiencias y por tanto a variante v5 como máximo.</li>
+</ul>
+<h3>8.3 Preferencia “CV en 2 páginas”</h3>
+<p>Si el formulario incluye una pregunta tipo “¿Te gustaría que tu CV tenga dos páginas?”:</p>
+<ul>
+<li><strong>“No, por favor que sea de una página”</strong> → <code>one_page</code> → se fuerza a 5 experiencias (v5).  </li>
+<li><strong>“Sólo si lo consideran estrictamente necesario...”</strong> → <code>only_if_needed</code> → también se fuerza v5.  </li>
+<li><strong>“Sí, prefiero que esté bien desarrollado toda mi experiencia”</strong> → <code>prefer_two_pages</code> → se permite v6/v7 cuando el template sea 9, 11, 12 o 13 y haya 6 o 7 experiencias.</li>
+</ul>
+<p>La búsqueda del valor se hace por keys como <code>two_pages</code>, <code>dos_paginas</code>, etc., o por texto de la pregunta en el nombre del campo (<code>getTwoPagesAnswerFromSrc</code>).</p>
+<h3>8.4 Nombres de archivos de plantilla</h3>
+<p>Patrón: <code>Plantilla_oficial_{id}_v{v}.pptx</code> o <code>Plantilla_oficial_{id}.pptx</code> (v3).<br>Para template_id 1 se usa el nombre base “Plantilla_oficial_1_verde”.<br>Ejemplo para id 11: <code>Plantilla_oficial_11.pptx</code> (v3), <code>Plantilla_oficial_11_v1.pptx</code>, …, <code>Plantilla_oficial_11_v7.pptx</code>.</p>
+<hr>
+<h2>9. Datos de entrada (body) y campos para la plantilla</h2>
+<h3>9.1 Estructura del body</h3>
+<p>El servidor acepta:</p>
+<ul>
+<li><strong>body</strong> con campos en la raíz, o  </li>
+<li><strong>body.data</strong> (objeto), o  </li>
+<li><strong>body.fields</strong> (objeto).</li>
+</ul>
+<p>Además se puede enviar en la raíz del body:</p>
+<ul>
+<li><code>template_id</code> (o <code>template</code>)  </li>
+<li><code>accent_color_raw</code> (también puede ir dentro de data/fields)</li>
+</ul>
+<p>El resto de campos pueden estar en <code>body</code>, <code>body.data</code> o <code>body.fields</code>. La función <code>getSrcFromBody(body)</code> devuelve ese objeto “fuente” y <code>flattenToTemplateData(body)</code> construye el objeto <code>data</code> que usa Docxtemplater.</p>
+<h3>9.2 Listado de campos (flattenToTemplateData)</h3>
+<p>A continuación se listan los campos que se leen y cómo se exponen en <code>data</code> (nombres que deben coincidir con los placeholders del PPTX). Los alias entre paréntesis son los que se buscan en la fuente si no existe el nombre principal.</p>
+<p><strong>Identificación y preferencias</strong></p>
+<ul>
+<li><code>template_id</code> (template, templateId)  </li>
+<li><code>two_pages_answer_raw</code> / <code>two_pages_pref</code> (derivados de la pregunta de 2 páginas)</li>
+</ul>
+<p><strong>Foto y color</strong></p>
+<ul>
+<li><code>photo_base64</code> (photoBase64, photo)  </li>
+<li><code>photo_url</code> (photoUrl)  </li>
+<li><code>accent_color_raw</code> (colores_raw, colors_raw, colores, colors)</li>
+</ul>
+<p><strong>Cabecera</strong></p>
+<ul>
+<li><code>name</code> (nombre)  </li>
+<li><code>title</code> (titulo)  </li>
+<li><code>about</code> (objective, objetivo)</li>
+</ul>
+<p><strong>Contacto</strong></p>
+<ul>
+<li><code>contact_phone</code> (phone, telefono)  </li>
+<li><code>contact_email</code> (email)  </li>
+<li><code>contact_location</code> (location, ubicacion)  </li>
+<li><code>contact_website</code> (website, web)  </li>
+<li><code>licencia</code> (licencia_conducir, driver_license)</li>
+</ul>
+<p><strong>Experiencia (1–7)</strong></p>
+<p>Para cada <code>n</code> de 1 a 7:</p>
+<ul>
+<li><code>exp_n_dates</code>  </li>
+<li><code>exp_n_company</code>  </li>
+<li><code>exp_n_role</code>  </li>
+<li><code>exp_n_b1</code> … <code>exp_n_b5</code> (bullets)  </li>
+<li><code>exp_n_bullets_block</code> (generado: concatenación de bullets con &quot;• &quot;)</li>
+</ul>
+<p><strong>Educación (1–3)</strong></p>
+<ul>
+<li><code>edu_1_school</code>, <code>edu_1_degree</code>, <code>edu_1_years</code>  </li>
+<li><code>edu_2_school</code>, <code>edu_2_degree</code>, <code>edu_2_years</code>  </li>
+<li><code>edu_3_school</code>, <code>edu_3_degree</code>, <code>edu_3_years</code></li>
+</ul>
+<p><strong>Idiomas, IT, Cursos</strong></p>
+<ul>
+<li><code>idiomas_raw</code> (idiomas, languages_raw) — se divide y se asigna a <code>idioma_1</code>, <code>idioma_2</code>, <code>idioma_3</code>  </li>
+<li><code>it_raw</code> (it, informatica_raw) — se divide y se asigna a <code>it_1</code> … <code>it_6</code>  </li>
+<li><code>cursos_raw</code> (cursos, courses_raw) — se divide y se asigna a <code>curso_1</code> … <code>curso_6</code>  </li>
+<li>O bien directamente: <code>idioma_1</code>, <code>idioma_2</code>, <code>idioma_3</code>, <code>it_1</code>…<code>it_6</code>, <code>curso_1</code>…<code>curso_6</code></li>
+</ul>
+<p><strong>Competencias</strong></p>
+<ul>
+<li><code>skill_1</code> … <code>skill_7</code></li>
+</ul>
+<p><strong>Sidebar (generados)</strong></p>
+<ul>
+<li><code>sidebar_sections</code> — secciones completas (Educación, Cursos, Informática, Idiomas, Competencias)  </li>
+<li><code>sidebar_sections_noedu</code> — sin educación  </li>
+<li><code>sidebar_sections_eduycursos</code> — solo formación académica y cursos  </li>
+<li><code>sidebar_sections_full</code> — incluye contacto como sección  </li>
+<li><code>sidebar_contact</code> — bloque contacto (iconos + texto)  </li>
+<li><code>contact_rows</code> — filas de contacto con iconos (para plantillas que usan ImageModule en iconos)</li>
+</ul>
+<p><strong>Internos (color)</strong></p>
+<ul>
+<li><code>_sidebarHex</code>, <code>_sidebarTextHex</code> — calculados a partir de <code>accent_color_raw</code>; no son placeholders pero se usan en reemplazo de color.</li>
+</ul>
+<h3>9.3 Límites de caracteres (LIMITS)</h3>
+<p>Los valores se recortan (si <code>LIMITS.ENABLE_CLAMP === true</code>) según:</p>
+<ul>
+<li>name: 200 | title: 240 | about: 6000 (o el max del perfil de la plantilla)  </li>
+<li>contact: email 180, phone 80, location 240, website 220  </li>
+<li>experiencia: role 400, company 400, dates 120, cada bullet 220  </li>
+<li>educación: school 380, degree 380, years 120  </li>
+<li>skill 200 | item (idiomas/it/cursos) 260</li>
+</ul>
+<p>Por defecto <code>ENABLE_CLAMP</code> está en <code>false</code>, es decir no se recorta por código.</p>
+<h3>9.4 Normalizaciones aplicadas</h3>
+<ul>
+<li><strong>Texto general:</strong> <code>safeStr</code>, normalización NFC, “undefined”/“null” → vacío.  </li>
+<li><strong>Nombre de instituciones:</strong> diccionario <code>CANONICAL_INSTITUTIONS</code> (UBA, UNLP, UTN, etc.) y <code>canonicalizeInstitutionRobust</code>, <code>normalizeInstitutionField</code>.  </li>
+<li><strong>Experiencia:</strong> <code>normalizeTechNames</code> (Power BI, Excel, JavaScript, etc.), <code>replaceForbiddenWords</code>, <code>stripPipesFromBullets</code>, <code>segmentBulletsIfNeeded</code>, <code>removeDuplicateBullets</code>, <code>normalizeExperienceVisualGroup</code>.  </li>
+<li><strong>Educación:</strong> formato &quot;DEGREE | SCHOOL (YEARS)&quot;, <code>normalizeEducationVisualGroup</code>, <code>normalizeStatusWords</code> (Finalizado, En curso).  </li>
+<li><strong>Idiomas:</strong> <code>enforceLevelFormat(..., &quot;idioma&quot;)</code> → formato &quot;Idioma | nivel X&quot;, filtro <code>shouldDropLanguageItem</code> (ej. español nativo se descarta).  </li>
+<li><strong>IT:</strong> <code>enforceLevelFormat(..., &quot;it&quot;)</code>, <code>normalizeITNoParens</code>, colapso de “Microsoft Office” a un solo ítem con nivel promedio.  </li>
+<li><strong>Cursos:</strong> <code>normalizeCourseLine</code> (título | lugar (fechas)), <code>normalizeRomanNumerals</code>, <code>normalizeTechNames</code>.  </li>
+<li><strong>Teléfono:</strong> <code>normalizePhone</code> (código país por defecto 54, formato +54…).  </li>
+<li><strong>Color:</strong> <code>resolveAccentHex</code> (hex o palabras de color en español, mapa COLOR_MAP, suavizado si es muy vivo).</li>
+</ul>
+<hr>
+<h2>10. Placeholders en la plantilla PPTX</h2>
+<p>En el PPTX se usan delimitadores <strong>{{</strong> y <strong>}}</strong> (Docxtemplater).</p>
+<p><strong>Texto:</strong></p>
+<ul>
+<li><code>{{name}}</code>, <code>{{title}}</code>, <code>{{about}}</code>  </li>
+<li><code>{{contact_phone}}</code>, <code>{{contact_email}}</code>, <code>{{contact_location}}</code>, <code>{{contact_website}}</code>  </li>
+<li><code>{{exp_1_role}}</code>, <code>{{exp_1_company}}</code>, <code>{{exp_1_dates}}</code>, <code>{{exp_1_b1}}</code> … <code>{{exp_1_b5}}</code>, <code>{{exp_1_bullets_block}}</code> (y lo mismo para exp_2 … exp_7)  </li>
+<li><code>{{edu_1_degree}}</code>, <code>{{edu_1_school}}</code>, <code>{{edu_1_years}}</code> (y edu_2, edu_3)  </li>
+<li><code>{{skill_1}}</code> … <code>{{skill_7}}</code>  </li>
+<li><code>{{idioma_1}}</code>, <code>{{idioma_2}}</code>, <code>{{idioma_3}}</code>  </li>
+<li><code>{{it_1}}</code> … <code>{{it_6}}</code>  </li>
+<li><code>{{curso_1}}</code> … <code>{{curso_6}}</code></li>
+</ul>
+<p><strong>Imagen (foto):</strong></p>
+<ul>
+<li><strong>{{%photo}}</strong> — placeholder de imagen; el valor debe ser Buffer o string base64 (en <code>data.photo</code> se pasa como <code>data:image/png;base64,...</code> y el ImageModule lo decodifica). El tamaño lo define <code>TEMPLATE_PROFILES[template_id].photoSize</code> (ej. [520, 520]).</li>
+</ul>
+<p><strong>Iconos (ImageModule):</strong></p>
+<ul>
+<li>Si la plantilla usa etiquetas tipo <code>icon</code> o que terminen en <code>_icon</code>, se pueden usar con <code>contact_rows</code> (cada fila con <code>icon</code> + <code>text</code>); el servidor rellena iconos desde <code>assets/icons/light/</code> o <code>dark/</code> según el color de texto del sidebar.</li>
+</ul>
+<p><strong>Sidebar por secciones:</strong></p>
+<ul>
+<li>Las secciones se construyen como listas de objetos con <code>title</code>, <code>line</code> (subrayado), <code>body</code>. Dependiendo del diseño del PPTX pueden usarse bloques como <code>sidebar_sections</code>, <code>sidebar_contact</code>, etc., con loops en Docxtemplater.</li>
+</ul>
+<p><strong>Marcadores para parche de sidebar:</strong></p>
+<ul>
+<li>En el XML del PPTX, shapes que contengan el texto <strong><strong>SB_TITLE</strong></strong> o <strong><strong>SB_BODY</strong></strong> se parchean (wrap, horzOverflow, noAutofit); después ese texto se borra para no verse en la diapositiva.</li>
+</ul>
+<hr>
+<h2>11. Procesamiento de la foto</h2>
+<ol>
+<li><p><strong>Origen:</strong>  </p>
+<ul>
+<li><code>photo_base64</code>: string (con o sin prefijo <code>data:image/...;base64,</code>).  </li>
+<li><code>photo_url</code>: URL de imagen; si es Google Drive se normaliza a <code>https://drive.google.com/uc?export=download&amp;id=...</code>.</li>
+</ul>
+</li>
+<li><p><strong>Descarga (solo URL):</strong>  </p>
+<ul>
+<li><code>fetchBufferFromUrl</code>: sigue redirecciones, User-Agent tipo navegador.</li>
+</ul>
+</li>
+<li><p><strong>buildFinalPhotoPng(photoBuf, { W, H }):</strong>  </p>
+<ul>
+<li>Rotar según EXIF (<code>sharp(photoBuf).rotate()</code>).  </li>
+<li>Recorte de bordes (<code>trim</code>), resize a W×H con <code>fit: &quot;cover&quot;</code>, centro.  </li>
+<li>Asegurar canal alpha (<code>ensureAlpha</code>), salida PNG.  </li>
+<li>Muestreo de color de esquinas (<code>sampleCornerColor</code>); si el fondo es claro (promedio ≥ 210), se aplica <strong>keying</strong>: <code>keyOutBackgroundToAlpha</code> con umbral y suavidad para convertir fondo blanco/similar en transparente.  </li>
+<li>Redimensionado final y luego <strong>forceCircleTransparentOutside</strong>: máscara SVG circular (centro, radio según tamaño), blend <code>dest-in</code> sobre la imagen → fuera del círculo queda transparente.  </li>
+<li>Resultado: PNG circular con transparencia, sin aplanar la imagen final.</li>
+</ul>
+</li>
+<li><p><strong>Inserción en plantilla:</strong>  </p>
+<ul>
+<li>Se asigna a <code>data.photo</code> como <code>data:image/png;base64,...</code>.  </li>
+<li>El ImageModule de Docxtemplater reconoce la etiqueta <code>photo</code> (o <code>%photo</code>) y devuelve el buffer y el tamaño [W, H] según el perfil de la plantilla.</li>
+</ul>
+</li>
+</ol>
+<hr>
+<h2>12. Sistema de colores</h2>
+<h3>12.1 Colores sentinela en el PPTX</h3>
+<ul>
+<li>En LibreOffice (o el editor donde se diseñe la plantilla) se debe usar <strong>exactamente</strong>:<ul>
+<li><strong>SENTINEL_HEX</strong> (por defecto <code>c0504d</code>) para: fondo del sidebar, barras, acentos, líneas.  </li>
+<li><strong>TEXT_SENTINEL_HEX</strong> (por defecto <code>543F3F</code>) para: todo el texto del sidebar que deba tener contraste automático (blanco o negro).</li>
+</ul>
+</li>
+</ul>
+<p>El servidor reemplaza en <strong>todos</strong> los XML del PPTX:</p>
+<ul>
+<li>Cada aparición de <code>SENTINEL_HEX</code> → color de sidebar (o gris por defecto si no hay color).  </li>
+<li>Cada aparición de <code>TEXT_SENTINEL_HEX</code> → color de texto del sidebar (blanco o negro según luminancia).</li>
+</ul>
+<h3>12.2 Cálculo del color de acento</h3>
+<ul>
+<li><strong>resolveAccentHex(accent_color_raw):</strong>  <ul>
+<li>Si el usuario pide “sin color” / “blanco y negro” / “ATS” / “Harvard” / etc. → no se aplica color (string vacío).  </li>
+<li>Si se pasa un hex de 6 caracteres (# opcional) → se usa (y se suaviza si <code>isTooVibrantHex</code>).  </li>
+<li>Si se pasa una palabra (ej. “azul”, “verde”, “rosa claro”) → se busca en <code>COLOR_MAP</code> y se devuelve el hex; si no hay coincidencia se usan heurísticas (ej. “azul” → tono azul por defecto).</li>
+</ul>
+</li>
+<li><strong>pickSidebarColorForWhiteText(accentHex):</strong> si el color es muy claro (luminancia &gt; 0.6), se oscurece para que el texto blanco sea legible.  </li>
+<li><strong>pickTextColorForSidebar(sidebarHex, accentRaw):</strong> por luminancia se elige negro o blanco; para algunos colores (naranja, ocre, marrón) se fuerza blanco.</li>
+</ul>
+<h3>12.3 Iconos del sidebar</h3>
+<ul>
+<li>Si el color de texto del sidebar es blanco → tema <strong>light</strong> (iconos claros).  </li>
+<li>Si es negro → tema <strong>dark</strong>.  </li>
+<li>Los iconos se cargan desde <code>assets/icons/{light|dark}/</code> (phone.png, mail.png, location.png, car.png) y se cachean en memoria (<code>loadIconBuffer</code>).</li>
+</ul>
+<hr>
+<h2>13. Sidebar: parches XML y overflow</h2>
+<p>Para evitar que el texto del sidebar se desborde o se recorte mal en LibreOffice:</p>
+<ul>
+<li>Se buscan en slides, slideLayouts y slideMasters los shapes que contienen <strong><strong>SB_TITLE</strong></strong> o <strong><strong>SB_BODY</strong></strong>.  </li>
+<li>En cada shape se reemplaza el marcador por texto vacío (para que no se vea) y se aplica <strong>patchBodyPr</strong>:  <ul>
+<li><code>wrap=&quot;square&quot;</code>  </li>
+<li><code>horzOverflow=&quot;clip&quot;</code> (corta el overflow horizontal)  </li>
+<li><code>vertOverflow=&quot;overflow&quot;</code> (opcional)  </li>
+<li>Se eliminan hijos de autofit y se fuerza <code>&lt;a:noAutofit/&gt;</code> para no redimensionar la caja.</li>
+</ul>
+</li>
+</ul>
+<p>Además se puede compactar el espaciado entre párrafos en shapes que contienen placeholders de educación (<code>edu_1_degree</code>, etc.) con <code>forceCompactParagraphSpacingInShape</code>.<br>Y se eliminan párrafos con viñeta que queden vacíos (<code>removeEmptyBulletedParagraphs</code>).</p>
+<hr>
+<h2>14. LibreOffice: PPTX → PDF y PPTX → PNG</h2>
+<ul>
+<li><p><strong>SOFFICE_PATH:</strong> en Windows suele ser la ruta a <code>soffice.exe</code>; en Linux (Docker/Render) es <code>soffice</code> (instalado con <code>apt-get install libreoffice libreoffice-impress ...</code>).</p>
+</li>
+<li><p><strong>convertPptxToPdf(pptxPath, outDir):</strong>  </p>
+<ul>
+<li>Argumentos: <code>--headless</code>, <code>--nologo</code>, <code>--nofirststartwizard</code>, <code>--norestore</code>, <code>--convert-to pdf</code>, <code>--outdir</code>, <code>outDir</code>, <code>pptxPath</code>.  </li>
+<li>El PDF generado tiene el mismo nombre que el PPTX con extensión <code>.pdf</code> en <code>outDir</code>.</li>
+</ul>
+</li>
+<li><p><strong>convertPptxToPng(pptxPath, outDir):</strong>  </p>
+<ul>
+<li>Mismo esquema con <code>--convert-to png</code>.  </li>
+<li>LibreOffice genera uno o varios PNG (una por diapositiva); el código toma el primero ordenado alfabéticamente (normalmente la primera diapositiva).</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2>15. Marca de agua en JPG</h2>
+<p><strong>applyTiledWatermarkToJpg(inputPngPath, outputJpgPath, options):</strong></p>
+<ul>
+<li>Lee el PNG generado por LibreOffice.  </li>
+<li>Crea un SVG con un <strong>patrón</strong> de texto (ej. &quot;SOFIJOBS&quot;) repetido en cuadrícula, con ángulo -28°, opacidad y color configurables.  </li>
+<li>Compone el patrón sobre la imagen con Sharp y exporta a JPG (calidad 92, mozjpeg).  </li>
+<li>Parámetros por defecto: <code>text: &quot;SOFIJOBS&quot;</code>, <code>color: &quot;#9CA3AF&quot;</code>, <code>opacity: 0.22</code>, <code>fontSize: 44</code>, <code>angle: -28</code>, <code>stepX: 420</code>, <code>stepY: 240</code>.</li>
+</ul>
+<hr>
+<h2>16. Generación del ZIP (/generate-pdf)</h2>
+<ul>
+<li>Se crea un directorio temporal, se genera el PPTX, se convierte a PDF y a PNG, se aplica la marca de agua al JPG.  </li>
+<li>Con <strong>archiver</strong> se crea un ZIP en memoria:  <ul>
+<li>Se añade el buffer del PDF con nombre <code>{fileBase}.pdf</code>.  </li>
+<li>Se añade el archivo JPG con nombre <code>{fileBase}.jpg</code>.</li>
+</ul>
+</li>
+<li>Se hace <code>archive.pipe(res)</code> y se envían los headers:  <ul>
+<li><code>Content-Type: application/zip</code>  </li>
+<li><code>Content-Disposition: attachment; filename=&quot;{fileBase}_pack.zip&quot;</code></li>
+</ul>
+</li>
+<li><code>fileBase</code> viene de <code>toSafeFilename(name)</code> (nombre del candidato sanitizado) o &quot;CV&quot; si no hay nombre.</li>
+</ul>
+<hr>
+<h2>17. Despliegue (Docker y Render)</h2>
+<h3>17.1 Dockerfile</h3>
+<ul>
+<li>Base: <strong>node:20-bookworm</strong>.  </li>
+<li>Instalación de LibreOffice: <code>libreoffice</code>, <code>libreoffice-impress</code>, fuentes (DejaVu, Liberation, Noto, etc.), <code>fontconfig</code>.  </li>
+<li><code>WORKDIR /app</code>.  </li>
+<li><code>COPY package.json package-lock.json ./</code> → <code>RUN npm ci --omit=dev</code> y comprobación de que <code>archiver</code> está instalado.  </li>
+<li><code>COPY . .</code> (resto del proyecto).  </li>
+<li><code>ENV PORT=3000</code>, <code>EXPOSE 3000</code>, <code>CMD [&quot;node&quot;, &quot;server.js&quot;]</code>.</li>
+</ul>
+<p>Importante: en el build no se deben omitir dependencias de producción; <code>archiver</code> debe estar en <code>dependencies</code> de <code>package.json</code>.</p>
+<h3>17.2 Render (u otro host)</h3>
+<ul>
+<li>El servicio debe exponer el <strong>PORT</strong> que asigne la plataforma (Render inyecta PORT).  </li>
+<li>Si se usa Docker, la imagen se construye con el Dockerfile anterior; si se usa “Native Environment” de Render, el build suele ser <code>npm install</code> + <code>node server.js</code>; en ese caso también hace falta que <code>package.json</code> incluya todas las dependencias.  </li>
+<li>Para evitar caché de build viejo, en Render se puede usar “Clear build cache” y volver a desplegar tras cambios en <code>package.json</code> o en el Dockerfile.</li>
+</ul>
+<hr>
+<h2>18. Resumen de constantes y configuración relevante</h2>
+<ul>
+<li><strong>LIMITS.ENABLE_CLAMP:</strong> false → no recorte por longitud en campos.  </li>
+<li><strong>TEMPLATE_PROFILES:</strong> por template_id, <code>about.maxChars</code> y <code>photoSize</code> [ancho, alto].  </li>
+<li><strong>TWO_PAGE_TEMPLATES:</strong> Set { 9, 11, 12, 13 }.  </li>
+<li><strong>TEMPLATE_VARIANTS:</strong> objeto template_id → { v1 … v7 } con nombres de archivo.  </li>
+<li><strong>TEMPLATE_MAP:</strong> template_id → nombre del archivo base (v3).  </li>
+<li><strong>COLOR_MAP:</strong> palabras en español → hex (violeta, rosa, azul, verde, gris, etc.).  </li>
+<li><strong>CANONICAL_INSTITUTIONS:</strong> nombres de universidades/instituciones → siglas (UBA, UNLP, UTN, etc.).  </li>
+<li><strong>Delimitadores Docxtemplater:</strong> <code>{{</code> y <code>}}</code>.  </li>
+<li><strong>Límite body:</strong> 60 MB.</li>
+</ul>
+<hr>
+<h2>19. Diagrama de flujo simplificado (texto)</h2>
+<pre><code>POST /generate-pdf (body JSON)
+  → getSrcFromBody
+  → template_id, countExperiences, twoPagesPreference
+  → getTemplatePath(templateId, expCountForVariant) → .pptx
+  → flattenToTemplateData(body) → data
+  → photo: base64/url → buildFinalPhotoPng → data.photo
+  → renderPptxFromTemplate(templateBuf, data)
+      → replaceColorInAllXml (SENTINEL, TEXT_SENTINEL)
+      → patchShapesByMarker (sidebar)
+  → write PPTX to tmp
+  → convertPptxToPdf, convertPptxToPng
+  → applyTiledWatermarkToJpg → JPG
+  → archiver ZIP (PDF + JPG) → response
+</code></pre>
+<hr>
+<p><em>Documento generado a partir del código de <strong>server.js</strong> del proyecto cv-pptx-api. Para detalles exactos de constantes o nombres de archivo, consultar el fuente.</em></p>
+
+</body>
+</html>

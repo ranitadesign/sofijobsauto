@@ -2372,6 +2372,86 @@ function cleanExperienceRedundancy(data) {
 }
 
 
+// =========================================================================
+// FOTO: preferencia del usuario (SIN FOTO)
+// =========================================================================
+
+// Ajustá estas 2 frases EXACTAS a lo que tengas en tu formulario
+const NO_PHOTO_ANSWERS = {
+  NO: "No quisiera utilizar foto así que no es necesario.",
+  ADD_LATER: "Agrego luego la foto para no perder tiempo, quisiera que me lo entreguen sin la imagen.",
+};
+
+function normalizeNoPhotoAnswer(raw) {
+  const s = safeStr(raw).trim();
+  if (!s) return "";
+
+  const norm = stripAccents(s).toLowerCase().replace(/\s+/g, " ").trim();
+
+  const no1 = stripAccents(NO_PHOTO_ANSWERS.NO).toLowerCase().replace(/\s+/g, " ").trim();
+  const no2 = stripAccents(NO_PHOTO_ANSWERS.ADD_LATER).toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (norm === no1) return "no_photo";
+  if (norm === no2) return "no_photo";
+
+  // fallback por keywords (por si cambia un poco el texto)
+  if (
+    norm.includes("sin foto") ||
+    norm.includes("sin la imagen") ||
+    norm.includes("no quisiera utilizar foto") ||
+    (norm.includes("agrego luego") && norm.includes("foto"))
+  ) {
+    return "no_photo";
+  }
+
+  return "";
+}
+
+/**
+ * Busca la respuesta "sin foto" aunque cambie la key del formulario.
+ * - Primero intenta keys comunes
+ * - Si no, busca por texto en el nombre del campo
+ */
+function getNoPhotoAnswerFromSrc(src) {
+  if (!src || typeof src !== "object") return "";
+
+  // 1) keys comunes (si querés, agregá las tuyas acá)
+  const direct = getAny(
+    src,
+    [
+      "photo_preference",
+      "include_photo",
+      "wants_photo",
+      "usar_foto",
+      "foto",
+      "prefiere_foto",
+      "foto_cv",
+    ],
+    ""
+  );
+  if (direct) return direct;
+
+  // 2) fallback: buscar por texto parecido en el nombre del campo/pregunta
+  const keys = Object.keys(src);
+  const patterns = [
+    "foto",
+    "utilizar foto",
+    "incluir foto",
+    "sin foto",
+    "sin la imagen",
+  ];
+
+  for (const k of keys) {
+    const kn = stripAccents(String(k)).toLowerCase();
+    if (patterns.some((p) => kn.includes(stripAccents(p).toLowerCase()))) {
+      const v = src[k];
+      if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+    }
+  }
+
+  return "";
+}
+
 
 function flattenToTemplateData(body) {
   const src =
@@ -2391,6 +2471,13 @@ function flattenToTemplateData(body) {
   data.template_id = safeStr(getAny(src, ["template_id", "template", "templateId"]));
   data.photo_url = safeStr(getAny(src, ["photo_url", "photoUrl"]));
   data.photo_base64 = safeStr(getAny(src, ["photo_base64", "photoBase64", "photo"]));
+
+    // ✅ Preferencia SIN FOTO (desde formulario)
+  data.no_photo_answer_raw = safeStr(getNoPhotoAnswerFromSrc(src));
+  data.no_photo_pref = normalizeNoPhotoAnswer(data.no_photo_answer_raw);
+
+  // wants_photo = true por defecto, salvo que el usuario pida explícitamente sin foto
+  data.wants_photo = data.no_photo_pref !== "no_photo";
 
   data.accent_color_raw = safeStr(getAny(src, ["accent_color_raw", "colores_raw", "colors_raw", "colores", "colors"], ""));
 
@@ -3458,37 +3545,46 @@ async function buildPptxAndTmpFiles(body) {
   );
 
 
-  let photoBuf = null;
+  // ============================================================
+  // ✅ FOTO: respetar preferencia del usuario (SIN FOTO)
+  // ============================================================
 
-  if (data.photo_base64) {
-    photoBuf = decodeBase64Image(data.photo_base64);
-  } else if (data.photo_url) {
-    photoBuf = await fetchBufferFromUrl(data.photo_url);
-  }
-
-  if (photoBuf && photoBuf.length) {
-    try {
-      const tId = Number(data.template_id || templateId || DEFAULT_TEMPLATE_ID || 1);
-      const profile = getProfile(tId);
-      const [W, H] = profile.photoSize || [520, 520];
-
-      const finalPng = await buildFinalPhotoPng(photoBuf, { W, H });
-
-      const meta = await sharp(finalPng).metadata();
-      console.log(`[PHOTO] OK tId=${tId} w=${W} h=${H} hasAlpha=${!!meta.hasAlpha} format=${meta.format}`);
-
-      data.photo = "data:image/png;base64," + finalPng.toString("base64");
-    } catch (e) {
-      console.warn("[PHOTO] processing failed, fallback:", e?.message || e);
-      try {
-        const fallbackPng = await sharp(photoBuf).png().toBuffer();
-        data.photo = "data:image/png;base64," + fallbackPng.toString("base64");
-      } catch (_) {
-        data.photo = "";
-      }
-    }
-  } else {
+  // Si el usuario pidió explícitamente sin foto, forzamos vacío
+  if (data.wants_photo === false) {
     data.photo = "";
+  } else {
+    let photoBuf = null;
+
+    if (data.photo_base64) {
+      photoBuf = decodeBase64Image(data.photo_base64);
+    } else if (data.photo_url) {
+      photoBuf = await fetchBufferFromUrl(data.photo_url);
+    }
+
+    if (photoBuf && photoBuf.length) {
+      try {
+        const tId = Number(data.template_id || templateId || DEFAULT_TEMPLATE_ID || 1);
+        const profile = getProfile(tId);
+        const [W, H] = profile.photoSize || [520, 520];
+
+        const finalPng = await buildFinalPhotoPng(photoBuf, { W, H });
+
+        const meta = await sharp(finalPng).metadata();
+        console.log(`[PHOTO] OK tId=${tId} w=${W} h=${H} hasAlpha=${!!meta.hasAlpha} format=${meta.format}`);
+
+        data.photo = "data:image/png;base64," + finalPng.toString("base64");
+      } catch (e) {
+        console.warn("[PHOTO] processing failed, fallback:", e?.message || e);
+        try {
+          const fallbackPng = await sharp(photoBuf).png().toBuffer();
+          data.photo = "data:image/png;base64," + fallbackPng.toString("base64");
+        } catch (_) {
+          data.photo = "";
+        }
+      }
+    } else {
+      data.photo = "";
+    }
   }
 
   const pptxBuf = renderPptxFromTemplate(templateBuf, data);
