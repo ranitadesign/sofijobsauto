@@ -3623,42 +3623,33 @@ async function buildJpgFromBody(body) {
    11) ENDPOINTS
    ========================================================================= */
 
-app.post("/generate-pdf", async (req, res) => {
-  try {
-    const body = req.body || {};
-
-    const { tmpDir, pptxPath, fileBase } = await buildPptxAndTmpFiles(body);
-
-    const pdfPath = await convertPptxToPdf(pptxPath, tmpDir);
-    const pdfBuf = fs.readFileSync(pdfPath);
-
-    const pngPath = await convertPptxToPng(pptxPath, tmpDir);
-    const jpgOut = path.join(tmpDir, `${fileBase}.jpg`);
-
-    await applyTiledWatermarkToJpg(pngPath, jpgOut, { text: "SOFIJOBS", color: "#9CA3AF", opacity: 0.22 });
-
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${fileBase}_pack.zip"`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (err) => {
-      throw err;
-    });
-
-    archive.pipe(res);
-
-    archive.append(pdfBuf, { name: `${fileBase}.pdf` });
-    archive.file(jpgOut, { name: `${fileBase}.jpg` });
-
-    archive.finalize();
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      error: String(err?.message || err),
-      stack: String(err?.stack || ""),
-    });
-  }
-});
+   app.post("/generate-pdf", async (req, res) => {
+    try {
+      const body = req.body || {};
+  
+      // Genera PPTX (templating + foto + color + parches)
+      const { pptxPath, fileBase } = await buildPptxAndTmpFiles(body);
+  
+      const pptxBuf = fs.readFileSync(pptxPath);
+  
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${fileBase}.pptx"`
+      );
+  
+      return res.send(pptxBuf);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({
+        error: String(err?.message || err),
+        stack: String(err?.stack || ""),
+      });
+    }
+  });
 
 app.post("/generate-only-pdf", async (req, res) => {
   try {
