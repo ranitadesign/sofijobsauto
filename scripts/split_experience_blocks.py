@@ -44,10 +44,10 @@ MARKER = "[[EXPERIENCE_BLOCK]]"
 # Layout: cabecera en 2 columnas (rol ~35%, empresa+fecha ~65%), bullets debajo a ancho completo
 ROLE_WIDTH_RATIO = 0.35   # rol ocupa 35% del ancho
 META_WIDTH_RATIO = 0.65   # empresa+fecha 65%
-LINE_HEIGHT_RATIO = 1.35
+LINE_HEIGHT_RATIO = 1.25
 GAP_RATIO = 0.45
-GAP_AFTER_HEADER_RATIO = 0.35  # gap entre cabecera y bullets
-GAP_BETWEEN_EXP_RATIO = 0.6    # gap entre experiencias
+GAP_AFTER_HEADER_RATIO = 0.20  # gap entre cabecera y bullets
+GAP_BETWEEN_EXP_RATIO = 0.25   # gap entre experiencias
 
 # 1 pt ≈ 12700 EMU en Drawing ML
 PT_TO_EMU = 12700
