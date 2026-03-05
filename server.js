@@ -56,6 +56,16 @@ const DEFAULT_SOFFICE =
 
 const SOFFICE_PATH = process.env.SOFFICE_PATH || DEFAULT_SOFFICE;
 
+/**
+ * Python para postproceso de PPTX (split_experience_blocks).
+ * Prioridad: (1) PYTHON_BIN si está definido, (2) por defecto "python".
+ * En Windows conviene usar la ruta completa del .exe o "python"; no usar "py" como
+ * default porque puede resolver a otra instalación distinta a la que tiene python-pptx.
+ */
+const PYTHON_BIN = process.env.PYTHON_BIN || "python";
+const SCRIPT_SPLIT_EXPERIENCE = path.join(__dirname, "scripts", "split_experience_blocks.py");
+const SCRIPT_SPLIT_SIDEBAR = path.join(__dirname, "scripts", "split_sidebar_blocks.py");
+
 // Carpeta de plantillas PPTX
 const TEMPLATES_DIR = path.join(__dirname, "templates");
 
@@ -3246,10 +3256,10 @@ function renderPptxFromTemplate(templateBuf, data) {
   pptxBuf = replaceColorInAllXml(pptxBuf, SENTINEL_HEX, sidebarHex).buffer;
   pptxBuf = replaceColorInAllXml(pptxBuf, TEXT_SENTINEL_HEX, textHex).buffer;
 
-  // ✅ FIX: noAutofit + wrap + horzOverflow clip (no invade)
+  // ✅ FIX: noAutofit + wrap + horzOverflow clip (no invade). Solo __SB_*; [[SIDEBAR_BLOCK]] no se parchea aquí (lo procesa split_sidebar_blocks.py).
   pptxBuf = patchShapesByMarker(pptxBuf, [
     { marker: "__SB_TITLE__", fn: forceNoAutofit },
-    { marker: "__SB_BODY__", fn: forceNoAutofit }, // <- más seguro que "keep autofit"
+    { marker: "__SB_BODY__", fn: forceNoAutofit },
   ]);
 
     // ✅ EDUCACIÓN: compactar interlineado en el shape que contiene placeholders edu_*
@@ -3263,6 +3273,108 @@ function renderPptxFromTemplate(templateBuf, data) {
   pptxBuf = removeEmptyBulletedParagraphs(pptxBuf);
 
   return pptxBuf;
+}
+
+/* =========================================================================
+   8b) Postproceso PPTX: split experience blocks (Python)
+   ========================================================================= */
+
+/**
+ * Ejecuta el script Python que busca [[EXPERIENCE_BLOCK]] en el PPTX,
+ * parsea experiencias (ROL | EMPRESA | FECHA + bullets) y reemplaza por
+ * textboxes separados. Si no hay marker, el script copia input -> output.
+ * @param {string} inputPath - ruta al PPTX generado
+ * @param {string} outputPath - ruta donde escribir el PPTX procesado
+ * @returns {Promise<void>}
+ */
+function runExperienceSplit(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    // Ejecutar el script vía -c + exec(open(...).read()) para que Python no lo trate como "script file"
+    // y así use el mismo sys.path que "python -I -c 'import pptx'", donde el import sí funciona.
+    const inline =
+      "import sys; sys.argv = [sys.argv[1], sys.argv[2], sys.argv[3]]; exec(open(sys.argv[0], encoding='utf-8').read())";
+    const args = ["-I", "-c", inline, SCRIPT_SPLIT_EXPERIENCE, inputPath, outputPath];
+    console.log("[POSTPROCESO] Ejecutando:", PYTHON_BIN, SCRIPT_SPLIT_EXPERIENCE, inputPath, outputPath);
+    const env = { ...process.env };
+    delete env.PYTHONPATH;
+    execFile(
+      PYTHON_BIN,
+      args,
+      { windowsHide: true, maxBuffer: 1024 * 1024, cwd: os.tmpdir(), env },
+      (error, stdout, stderr) => {
+        if (error) {
+          const stderrStr = (stderr && stderr.toString()) || "";
+          const stdoutStr = (stdout && stdout.toString()) || "";
+          const out = `${stderrStr}\n${stdoutStr}`.trim();
+          let msg;
+          if (error.code === "ENOENT") {
+            msg = `Python no encontrado. Configurá PYTHON_BIN con la ruta del ejecutable. Actual: "${PYTHON_BIN}".`;
+          } else if (
+            out.includes("python-pptx") ||
+            out.includes("falta la dependencia") ||
+            out.includes("ImportError") ||
+            out.includes("ModuleNotFoundError")
+          ) {
+            msg =
+              "No se pudo importar python-pptx en el intérprete que usa el postproceso. " +
+              "Verificá que el binario en PYTHON_BIN sea el mismo donde instalaste la dependencia. " +
+              "Sugerencia: ejecutá `python -m pip install python-pptx` en una terminal y usá ese mismo " +
+              "binario (ej. configurá PYTHON_BIN con la ruta exacta del ejecutable, o $env:PYTHON_BIN=\"python\"). " +
+              `Binario actual: "${PYTHON_BIN}". Salida: ${out.slice(0, 300)}`;
+          } else {
+            msg = `Postproceso PPTX falló (código ${error.code}). ${out || error.message}`.trim();
+          }
+          return reject(new Error(msg));
+        }
+        resolve();
+      }
+    );
+  });
+}
+
+/**
+ * Ejecuta split_sidebar_blocks.py (postproceso del sidebar con marker [[SIDEBAR_BLOCK]]).
+ * Mismo patrón que runExperienceSplit: PYTHON_BIN, env sin PYTHONPATH, cwd tmpdir.
+ */
+function runSidebarSplit(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const inline =
+      "import sys; sys.argv = [sys.argv[1], sys.argv[2], sys.argv[3]]; exec(open(sys.argv[0], encoding='utf-8').read())";
+    const args = ["-I", "-c", inline, SCRIPT_SPLIT_SIDEBAR, inputPath, outputPath];
+    console.log("[POSTPROCESO] Ejecutando:", PYTHON_BIN, SCRIPT_SPLIT_SIDEBAR, inputPath, outputPath);
+    const env = { ...process.env };
+    delete env.PYTHONPATH;
+    execFile(
+      PYTHON_BIN,
+      args,
+      { windowsHide: true, maxBuffer: 1024 * 1024, cwd: os.tmpdir(), env },
+      (error, stdout, stderr) => {
+        if (error) {
+          const stderrStr = (stderr && stderr.toString()) || "";
+          const stdoutStr = (stdout && stdout.toString()) || "";
+          const out = `${stderrStr}\n${stdoutStr}`.trim();
+          let msg;
+          if (error.code === "ENOENT") {
+            msg = `Python no encontrado. Configurá PYTHON_BIN con la ruta del ejecutable. Actual: "${PYTHON_BIN}".`;
+          } else if (
+            out.includes("python-pptx") ||
+            out.includes("falta la dependencia") ||
+            out.includes("ImportError") ||
+            out.includes("ModuleNotFoundError")
+          ) {
+            msg =
+              "No se pudo importar python-pptx en el intérprete que usa el postproceso. " +
+              "Verificá que el binario en PYTHON_BIN sea el mismo donde instalaste la dependencia. " +
+              `Binario actual: "${PYTHON_BIN}". Salida: ${out.slice(0, 300)}`;
+          } else {
+            msg = `Postproceso sidebar PPTX falló (código ${error.code}). ${out || error.message}`.trim();
+          }
+          return reject(new Error(msg));
+        }
+        resolve();
+      }
+    );
+  });
 }
 
 /* =========================================================================
@@ -3626,12 +3738,20 @@ async function buildJpgFromBody(body) {
    app.post("/generate-pdf", async (req, res) => {
     try {
       const body = req.body || {};
-  
+
       // Genera PPTX (templating + foto + color + parches)
-      const { pptxPath, fileBase } = await buildPptxAndTmpFiles(body);
-  
-      const pptxBuf = fs.readFileSync(pptxPath);
-  
+      const { tmpDir, pptxPath, fileBase } = await buildPptxAndTmpFiles(body);
+
+      // Postproceso 1: split experience blocks (script Python)
+      const outputPptxPath = path.join(tmpDir, `${path.basename(pptxPath, ".pptx")}-processed.pptx`);
+      await runExperienceSplit(pptxPath, outputPptxPath);
+
+      // Postproceso 2: split sidebar blocks (script Python); orden: experience primero, sidebar después
+      const finalPptxPath = path.join(tmpDir, `${path.basename(pptxPath, ".pptx")}-sidebar.pptx`);
+      await runSidebarSplit(outputPptxPath, finalPptxPath);
+
+      const pptxBuf = fs.readFileSync(finalPptxPath);
+
       res.setHeader(
         "Content-Type",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -3640,7 +3760,7 @@ async function buildJpgFromBody(body) {
         "Content-Disposition",
         `attachment; filename="${fileBase}.pptx"`
       );
-  
+
       return res.send(pptxBuf);
     } catch (err) {
       console.error(err);
@@ -3686,6 +3806,19 @@ app.listen(PORT, () => {
   console.log(`CV API OK en http://127.0.0.1:${PORT}`);
   console.log(`Templates dir: ${TEMPLATES_DIR}`);
   console.log(`LibreOffice: ${SOFFICE_PATH}`);
+  // Resolver y mostrar el binario Python real (mismo que usará el postproceso)
+  execFile(
+    PYTHON_BIN,
+    ["-c", "import sys; print(sys.executable)"],
+    { windowsHide: true, maxBuffer: 4096 },
+    (err, stdout) => {
+      const resolved = !err && stdout ? stdout.toString().trim() : PYTHON_BIN;
+      console.log(`Python (postproceso): ${resolved}`);
+      if (err) {
+        console.warn("[POSTPROCESO] No se pudo resolver la ruta de Python; se usará:", PYTHON_BIN);
+      }
+    }
+  );
   console.log(`ENABLE_CLAMP: ${LIMITS.ENABLE_CLAMP}`);
   console.log(`SENTINEL_HEX: ${SENTINEL_HEX}`);
   console.log(`TEXT_SENTINEL_HEX: ${TEXT_SENTINEL_HEX}`);
