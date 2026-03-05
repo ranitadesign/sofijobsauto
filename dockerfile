@@ -3,6 +3,8 @@ FROM node:20-bookworm
 RUN apt-get update && apt-get install -y \
   libreoffice \
   libreoffice-impress \
+  python3 \
+  python3-pip \
   fonts-dejavu \
   fonts-liberation \
   fonts-noto \
@@ -16,6 +18,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev \
   && node -e "require('archiver')" || (echo "FATAL: archiver not installed" && exit 1)
+
+# Postproceso PPTX (python-pptx). En Render setear PYTHON_BIN=python3
+COPY requirements.txt ./
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
 

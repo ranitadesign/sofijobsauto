@@ -1,0 +1,7 @@
+# Postproceso PPTX (split_experience_blocks.py, split_sidebar_blocks.py).
+# Docker/Render: pip3 install -r requirements.txt
+python-pptx==1.0.2
+lxml
+Pillow
+XlsxWriter
+typing-extensions
