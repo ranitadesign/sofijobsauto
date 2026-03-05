@@ -19,9 +19,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev \
   && node -e "require('archiver')" || (echo "FATAL: archiver not installed" && exit 1)
 
-# Postproceso PPTX (python-pptx). En Render setear PYTHON_BIN=python3
+# Postproceso PPTX (python-pptx). Debian 12+ (PEP 668) exige --break-system-packages en contenedor.
+# En Render setear PYTHON_BIN=python3
 COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY . .
 
