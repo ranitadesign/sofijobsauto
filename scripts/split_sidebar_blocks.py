@@ -40,10 +40,17 @@ PT_TO_EMU = 12700
 LINE_HEIGHT_RATIO = 1.35
 GAP_BETWEEN_SECTIONS_RATIO = 0.5
 
-# Fallbacks solo cuando no se detecta el tipo en el shape original
+# Preferir título distinto de CONTACTO para titleStyleRef (misma apariencia en todas las secciones)
+CONTACTO_TITLE_NORMALIZED = "CONTACTO"
+
+# Fallbacks cuando no se detecta el tipo (nunca usar title para body ni body para title)
 STYLE_TITLE_FALLBACK = {"size_pt": 18, "name": None, "color": None, "bold": True, "italic": False, "alignment": None}
 STYLE_LINE_FALLBACK = {"size_pt": 12, "name": None, "color": None, "bold": False, "italic": False, "alignment": None}
-STYLE_BODY_FALLBACK = {"size_pt": 11, "name": None, "color": None, "bold": False, "italic": False, "alignment": None}
+# Body fallback cuando no hay bullets en el sidebar (12pt normal)
+STYLE_BODY_FALLBACK = {"size_pt": 12, "name": None, "color": None, "bold": False, "italic": False, "alignment": None}
+# Límite máximo para title_size_pt (evitar locuras)
+TITLE_SIZE_MAX_PT = 40
+TITLE_BODY_RATIO = 2.0
 
 
 def pt_to_emu(pt_val):
@@ -88,6 +95,17 @@ def _is_bullet_paragraph(text):
     """True si el texto del párrafo empieza con bullet (•, -, ·, *)."""
     s = (text or "").strip()
     return s.startswith(("•", "-", "·")) or (s.startswith("*") and len(s) > 1)
+
+
+def _normalize_section_title(title):
+    """Normaliza título de sección para comparar (ej. CONTACTO)."""
+    return (title or "").strip().upper()
+
+
+def _is_bullet_dot_paragraph(text):
+    """True si el párrafo empieza con bullet real "•"."""
+    s = (text or "").strip()
+    return s.startswith("•")
 
 
 def _run_contains_marker(run):
@@ -142,13 +160,21 @@ def _extract_run_style(run, para):
 
 def extract_sidebar_styles(shape):
     """
-    Extrae 3 estilos distintos del textbox [[SIDEBAR_BLOCK]]:
-    - titleStyle: primer párrafo que parezca título (no bullet, no underline).
-    - lineStyle: primer párrafo underline (─, -, etc.).
-    - bodyStyle: primer párrafo bullet ("• ...") o primer body line; así el título no contamina el body.
-    Ignorar el marker para estilos. Si no se detecta alguno, se usa fallback en process_slide.
+    Extrae estilos de referencia globales UNA sola vez por bloque (ignorando el marker).
+    bodyStyleRef se detecta de forma estricta desde el primer bullet "•" (o "-", "·" como fallback).
+    Si no hay bullets en todo el sidebar, bodyStyleRef queda None (fallback 12pt en process_slide).
+
+    - titleStyleRef: solo para name/color; el size del título se calcula como 2× body_size_pt.
+    - lineStyleRef: primer párrafo underline; al aplicar se usa body size y bold=false.
+    - bodyStyleRef: primer párrafo cuyo texto trim empiece con "•", o "-"/"·" como fallback.
+      Extrae size_pt, font.name, color.rgb, italic, alignment del primer run no vacío.
     """
-    result = {"titleStyle": None, "lineStyle": None, "bodyStyle": None}
+    result = {
+        "titleStyleRef": None,
+        "lineStyleRef": None,
+        "bodyStyleRef": None,
+    }
+    first_title_style = None
     try:
         if not shape.has_text_frame:
             return result
@@ -169,18 +195,21 @@ def extract_sidebar_styles(shape):
             style = _extract_run_style(run_for_style, para)
 
             if _is_underline_line(text):
-                if result["lineStyle"] is None:
-                    result["lineStyle"] = style
+                if result["lineStyleRef"] is None:
+                    result["lineStyleRef"] = style
             elif _is_title_line(text):
-                if result["titleStyle"] is None:
-                    result["titleStyle"] = style
-            elif _is_bullet_paragraph(text):
-                if result["bodyStyle"] is None:
-                    result["bodyStyle"] = style
-            else:
-                # Línea de body sin bullet (ej. texto plano); usar para bodyStyle solo si aún no tenemos
-                if result["bodyStyle"] is None:
-                    result["bodyStyle"] = style
+                if first_title_style is None:
+                    first_title_style = style
+                if _normalize_section_title(text) != CONTACTO_TITLE_NORMALIZED and result["titleStyleRef"] is None:
+                    result["titleStyleRef"] = style
+            elif _is_bullet_dot_paragraph(text):
+                if result["bodyStyleRef"] is None:
+                    result["bodyStyleRef"] = style
+            elif text.strip().startswith(("-", "·")):
+                if result["bodyStyleRef"] is None:
+                    result["bodyStyleRef"] = style
+        if result["titleStyleRef"] is None and first_title_style is not None:
+            result["titleStyleRef"] = first_title_style
         return result
     except Exception:
         return result
@@ -315,44 +344,71 @@ def process_slide(slide, slide_idx, dry_run=False):
             height_emu = shape.height
             remove_shape(shape)
 
-            title_style = styles.get("titleStyle") or STYLE_TITLE_FALLBACK
-            line_style = styles.get("lineStyle") or STYLE_LINE_FALLBACK
-            body_style = styles.get("bodyStyle") or STYLE_BODY_FALLBACK
-            body_style_applied = {**body_style, "bold": False}
+            body_style_ref = styles.get("bodyStyleRef") or STYLE_BODY_FALLBACK
+            body_size_pt = float(body_style_ref.get("size_pt") or 12)
+            body_size_pt = max(1, body_size_pt)
+            title_size_pt = min(max(1, round(body_size_pt * TITLE_BODY_RATIO)), TITLE_SIZE_MAX_PT)
+            title_style_ref = styles.get("titleStyleRef") or STYLE_TITLE_FALLBACK
+
+            title_style = {
+                "size_pt": title_size_pt,
+                "name": body_style_ref.get("name") or title_style_ref.get("name"),
+                "color": body_style_ref.get("color") or title_style_ref.get("color"),
+                "bold": True,
+                "italic": False,
+                "alignment": None,
+            }
+            line_style_ref = styles.get("lineStyleRef") or STYLE_LINE_FALLBACK
+            line_style = {
+                "size_pt": body_size_pt,
+                "name": body_style_ref.get("name") or line_style_ref.get("name"),
+                "color": body_style_ref.get("color") or line_style_ref.get("color"),
+                "bold": False,
+                "italic": False,
+                "alignment": line_style_ref.get("alignment"),
+            }
+            body_style_applied = {
+                "size_pt": body_size_pt,
+                "name": body_style_ref.get("name"),
+                "color": body_style_ref.get("color"),
+                "bold": False,
+                "italic": body_style_ref.get("italic", False),
+                "alignment": body_style_ref.get("alignment"),
+            }
             cursor_y = top_emu
 
             if DEBUG:
-                t_pt = title_style.get("size_pt")
-                l_pt = line_style.get("size_pt")
-                b_pt = body_style.get("size_pt")
-                print(f"[split_sidebar] DEBUG title_pt={t_pt} line_pt={l_pt} body_pt={b_pt}", file=sys.stderr)
+                print(f"[split_sidebar] body_size_pt={body_size_pt}", file=sys.stderr)
+                print(f"[split_sidebar] title_size_pt={title_size_pt} (2x)", file=sys.stderr)
 
             for sec in sections:
-                title_pt = title_style.get("size_pt") or 18
-                ul_pt = line_style.get("size_pt") or 12
-                body_pt = body_style.get("size_pt") or 11
+                is_contacto = _normalize_section_title(sec["title"]) == CONTACTO_TITLE_NORMALIZED
+                title_pt = title_size_pt
+                ul_pt = body_size_pt
+                body_pt = body_size_pt
 
-                # Title (estilo extraído del título original)
                 title_h = _line_height_emu(title_pt)
                 if sec["title"]:
                     add_textbox(slide, left_emu, cursor_y, width_emu, title_h, sec["title"], title_style)
                 cursor_y += title_h
 
-                # Underline / line (estilo extraído del separador original)
                 if sec["underline"]:
                     ul_h = _line_height_emu(ul_pt)
                     add_textbox(slide, left_emu, cursor_y, width_emu, ul_h, sec["underline"], line_style)
                     cursor_y += ul_h
 
-                # Body: bodyStyle con bold=False para que el título no contamine
+                body_pt_use = body_pt
                 body_text = "\n".join(sec["body_lines"])
                 if sec["body_lines"]:
-                    est_lines = _estimate_body_lines(body_text, width_emu, body_pt)
-                    body_h = est_lines * _line_height_emu(body_pt)
-                    add_textbox(slide, left_emu, cursor_y, width_emu, body_h, body_text, body_style_applied, bullet=True)
+                    use_bullet = not is_contacto
+                    style_for_body = {**body_style_applied, "bold": False}
+                    body_h = _estimate_body_lines(body_text, width_emu, body_pt_use) * _line_height_emu(body_pt_use)
+                    add_textbox(slide, left_emu, cursor_y, width_emu, body_h, body_text, style_for_body, bullet=use_bullet)
                     cursor_y += body_h
+                    if DEBUG:
+                        print(f"[split_sidebar] section title={sec['title'][:30]!r}", file=sys.stderr)
 
-                cursor_y += _gap_between_sections_emu(max(title_pt, body_pt))
+                cursor_y += _gap_between_sections_emu(max(title_pt, body_pt_use))
 
         except Exception as e:
             print(f"Error procesando bloque sidebar: {e}", file=sys.stderr)

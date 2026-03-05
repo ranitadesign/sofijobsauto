@@ -1332,12 +1332,15 @@ function buildSidebarSectionsFull(
   const phone = safeStr(data.contact_phone).trim();
   const email = safeStr(data.contact_email).trim();
   const loc = safeStr(data.contact_location).trim();
+  const licenciaNorm = safeStr(data.licencia).trim().toLowerCase();
+  const hasLicense = licenciaNorm === "si" || licenciaNorm === "sí" || licenciaNorm.includes("licencia");
 
   if (phone) contact.push(phone);
   if (email) contact.push(email);
   if (loc) contact.push(loc);
+  if (hasLicense) contact.push("Licencia de conducir");
 
-  pushSection("Contacto", contact);
+  pushSection("Contacto", asBulletLines(contact));
 
   pushSection("Educación", asBulletLines(buildEducationLines(data, { gapLines: 0 })));
 
