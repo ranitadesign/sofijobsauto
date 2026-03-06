@@ -44,10 +44,10 @@ MARKER = "[[EXPERIENCE_BLOCK]]"
 # Layout: cabecera en 2 columnas (rol ~35%, empresa+fecha ~65%), bullets debajo a ancho completo
 ROLE_WIDTH_RATIO = 0.35   # rol ocupa 35% del ancho
 META_WIDTH_RATIO = 0.65   # empresa+fecha 65%
-LINE_HEIGHT_RATIO = 1.25
+LINE_HEIGHT_RATIO = 1.15
 GAP_RATIO = 0.45
-GAP_AFTER_HEADER_RATIO = 0.20  # gap entre cabecera y bullets
-GAP_BETWEEN_EXP_RATIO = 0.25   # gap entre experiencias
+GAP_AFTER_HEADER_RATIO = 0.08  # gap entre cabecera y bullets
+GAP_BETWEEN_EXP_RATIO = 0.10   # gap entre experiencias
 
 # 1 pt ≈ 12700 EMU en Drawing ML
 PT_TO_EMU = 12700
@@ -430,17 +430,19 @@ def process_slide(slide, slide_idx, dry_run=False):
                     lines = 0
                     for b in exp["bullets"]:
                         lines += _estimate_bullet_lines(b, width_emu, bullet_size)
-                    lines += 1  # padding
+                    max_lines = max(1, len(exp["bullets"]) * 2)
+                    lines = min(lines, max_lines)
+                    lines += 0.3
                     line_height_emu = _line_height_emu(bullet_size)
-                    bullets_h = lines * line_height_emu
+                    bullets_h = int(lines * line_height_emu)
                     min_lines = max(1, len(exp["bullets"]) * 1)
                     bullets_h = max(bullets_h, min_lines * line_height_emu)
-                    bullets_h += int(0.5 * line_height_emu)
+                    bullets_h += int(0.15 * line_height_emu)
                 else:
                     bullet_text = ""
                     bullets_h = 0
 
-                gap_between_h = _gap_between_exp_emu(bullet_size if exp["bullets"] else meta_size)
+                gap_between_h = _gap_between_exp_emu(bullet_size)
 
                 # --- Fila 1: cabecera (mismo top = cursor_y) ---
                 header_top = cursor_y
