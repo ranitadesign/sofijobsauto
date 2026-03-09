@@ -305,6 +305,7 @@ function normalizeTechNames(s) {
 
     // ✅ razón social: S.A. siempre en mayúscula (cubre "sa", "s.a", "s. a.", etc.)
     [/\bS\s*\.?\s*A\s*\.?\b/gi, "S.A."],
+    [/\bS\s*\.?\s*R\s*\.?\s*L\s*\.?\b/gi, "SRL"],
 
 
 
