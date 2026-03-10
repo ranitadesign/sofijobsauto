@@ -3678,46 +3678,11 @@ async function buildPptxAndTmpFiles(body) {
 
 
   // ============================================================
-  // ✅ FOTO: respetar preferencia del usuario (SIN FOTO)
+  // ✅ FOTO: ignorada — no se descarga ni se coloca en el PPTX
   // ============================================================
 
-  // Si el usuario pidió explícitamente sin foto, forzamos vacío
-  if (data.wants_photo === false) {
-    data.photo = "";
-  } else {
-    let photoBuf = null;
-
-    if (data.photo_base64) {
-      photoBuf = decodeBase64Image(data.photo_base64);
-    } else if (data.photo_url) {
-      photoBuf = await fetchBufferFromUrl(data.photo_url);
-    }
-
-    if (photoBuf && photoBuf.length) {
-      try {
-        const tId = Number(data.template_id || templateId || DEFAULT_TEMPLATE_ID || 1);
-        const profile = getProfile(tId);
-        const [W, H] = profile.photoSize || [520, 520];
-
-        const finalPng = await buildFinalPhotoPng(photoBuf, { W, H });
-
-        const meta = await sharp(finalPng).metadata();
-        console.log(`[PHOTO] OK tId=${tId} w=${W} h=${H} hasAlpha=${!!meta.hasAlpha} format=${meta.format}`);
-
-        data.photo = "data:image/png;base64," + finalPng.toString("base64");
-      } catch (e) {
-        console.warn("[PHOTO] processing failed, fallback:", e?.message || e);
-        try {
-          const fallbackPng = await sharp(photoBuf).png().toBuffer();
-          data.photo = "data:image/png;base64," + fallbackPng.toString("base64");
-        } catch (_) {
-          data.photo = "";
-        }
-      }
-    } else {
-      data.photo = "";
-    }
-  }
+  // Siempre ignorar foto (aunque venga photo_url o photo_base64): no descargar, no poner
+  data.photo = "";
 
   const pptxBuf = renderPptxFromTemplate(templateBuf, data);
 
